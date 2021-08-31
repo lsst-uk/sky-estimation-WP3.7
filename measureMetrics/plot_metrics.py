@@ -9,7 +9,7 @@ from astropy.table import Table
 from matplotlib import patches as ptchs
 from scipy.signal import medfilt
 
-import utility as ut
+from measureMetrics import utility as ut
 
 
 # =============================================================================
