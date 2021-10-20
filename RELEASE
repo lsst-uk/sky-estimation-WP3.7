@@ -1,0 +1,7 @@
+Release notes
+-------------
+
+Current Version: 0.1
+ - Includes RSP Python code to measure and plot sky subtraction tracking metrics (measureMetrics)
+ - Includes [defunct] software for creating fake galaxy cluster models (makeDwarfs)
+ - Includes Jupyter Notebooks demonstrating usage and showing results
