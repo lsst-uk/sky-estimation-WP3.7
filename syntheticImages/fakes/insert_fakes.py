@@ -56,7 +56,7 @@ class ImageBuilder():
             "Pixel scale must be positive."
         assert (type(polyDict) == dict), \
             "polyDict must be a dictionary."
-        assert (type(noise) == galsim.noise.CCDNoise) | (noise == None), \
+        assert (type(noise) == galsim.noise.CCDNoise) | (noise is None), \
             "noise must be galsim.noise.CCDNoise or None."
         self.dimX = dimX
         self.dimY = dimY
@@ -94,7 +94,7 @@ class ImageBuilder():
                     'CD2_2': pxScale}
         self.w = WCS(wcs_dict)
 
-    def makePolyDict(self, fracDisplacement, random=True):
+    def makePolyDict(self, fracDisplacement, random=False, seed=None):
         '''
         Generates sky polynomial coefficients, up to order 2
             Parameters
@@ -105,6 +105,9 @@ class ImageBuilder():
                 adjust this to 2000 + N(0, 2000*0.05)
             random : `bool`
                 Chooses whether to add random displacements to coefficients
+            seed : `int`
+                For the random number generator.  Used mainly for testing
+                purposes.
 
             Returns
             -------
@@ -112,12 +115,16 @@ class ImageBuilder():
             terms, up to c2_2
 
         '''
+        assert fracDisplacement > 0, "Displacement must be a positive number"
         all_keys = ['c0_0', 'c0_1', 'c0_2',
                     'c1_0', 'c1_1', 'c1_2',
                     'c2_0', 'c2_1', 'c2_2']
         if random:
             # Randomly adjust sky coefficients
-            rng = np.random.default_rng()
+            if seed is not None:
+                rng = np.random.default_rng(seed)
+            else:
+                rng = np.random.default_rng()
             for key in all_keys:
                 if key not in self.polyDict:
                     self.polyDict[key] = 0
@@ -130,7 +137,8 @@ class ImageBuilder():
                 if key not in self.polyDict:
                     self.polyDict[key] = 0
 
-    def makeModelSky(self, polyDeg, fracDisplacement=0.0, random=False):
+    def makeModelSky(self, polyDeg, fracDisplacement=0.05,
+                     random=False, seed=None):
         '''
         Creates randomized polynomial sky patterns up to second order to add to
         images
@@ -144,16 +152,21 @@ class ImageBuilder():
                 adjust this to 2000 + N(0, 2000*0.05)
             random : `bool`
                 Chooses whether to add random displacements to coefficients
+            seed : `int`
+                For the random number generator.  Used mainly for testing
+                purposes.
 
             Returns
             -------
             self.sky : `numpy.array'
                 Image of polynomial sky pattern
         '''
+        assert (polyDeg == 0) | (polyDeg == 1) | (polyDeg == 2),\
+            "Polynomial order must be 0, 1, or 2"
         X, Y = np.meshgrid(np.arange(1, self.dimX+1),
                            np.arange(1, self.dimY+1))
 
-        self.makePolyDict(fracDisplacement, random)
+        self.makePolyDict(fracDisplacement, random, seed)
 
         if polyDeg == 0:
             m = Legendre2D(polyDeg, polyDeg,
@@ -175,13 +188,15 @@ class ImageBuilder():
                            c2_0=self.polyDict['c2_0'],
                            c2_1=self.polyDict['c2_1'],
                            c2_2=self.polyDict['c2_2'])
-
-        else:
-            print('Polynomial order must be between 0 and 2!')
-
-        self.sky = m(X, Y)  # Will throw an error here for negative values!
+        try:
+            self.sky = m(X, Y)
+        except ValueError:
+            print("Coefficients yielded a sky with negative values!")
         # Adding Poisson noise
-        rng = np.random.default_rng()
+        if seed is None:
+            rng = np.random.default_rng()
+        else:
+            rng = np.random.default_rng(seed)
         fish = rng.poisson(self.sky)
         fish_amp = self.sky - fish
         self.sky += fish_amp
