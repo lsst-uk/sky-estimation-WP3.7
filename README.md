@@ -5,6 +5,8 @@ makeDwarfs : script for making model dwarf ETGs for injection into model cluster
 
 measureMetrics : software for doing photometry on images and outputting metrics to track improvements to the LSST sky subtraction algorithm
 
+syntheticImages : software for creating mock images, with model galaxies, stars, and noise.  Used for testing sky-subtraction algorithm against ground-truth.
+
 
 ### License
 ***
