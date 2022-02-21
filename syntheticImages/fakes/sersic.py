@@ -73,7 +73,7 @@ def getMu0(mag, rEff, n, magZp=21.0967):
     b = bnn(n, 0.5)
     lTot = 10**(-0.4*(mag-magZp))
     i0 = (lTot*(b**(2*n))) \
-         / (gamma(2*n)*2*n*np.pi*rEff**2)
+        / (gamma(2*n)*2*n*np.pi*rEff**2)
     mu0 = -2.5*np.log10(i0) + magZp
 
     return mu0
@@ -113,7 +113,7 @@ def getSersicRadProf(mag, rEff, n, maxR, pxScale):
     return rad, muR
 
 
-def sbLimWidth(mag, n, rEff, axRat, sbLim, pxScale=0.168):
+def sbLimWidth(mag, n, rEff, axRat, sbLim):
     '''
     Derives an isophotal radius for a projected Sersic profile, which can be
     used to determine an appropriate stamp width
@@ -125,32 +125,24 @@ def sbLimWidth(mag, n, rEff, axRat, sbLim, pxScale=0.168):
         n : `float`
             Sersic index (useful range is 0.5 -- 6)
         rEff : `float'
-            Half-light radius, in pixels
+            Half-light radius, in arcseconds
         axRat : `float`
             Projected axis ratio (values between 0 and 1)
         sbLim : `float`
             Desired surface brightness at which to truncate the model
-        pxScale : `float`
-            Arcsec per pixel, for unit conversions
         Returns
         -------
         rIsoPx : `int`
             Width of the stamp that limits the model to sbLim in surface
-            brightness, in pixels
+            brightness, in arcseconds
 
-    NOTE: current implementation is a bit crude, as it assumes the model is
-    face-on.  So this will overestimate the stamp size for inclined models.
+    NOTE: current implementation is a bit crude, as it assumes the model PA
+    is multiples of 90 degrees.  Will underestimate if it's between those.
     '''
     bn = bnn(n, 0.5)
-    rEffArcsec = rEff * pxScale
-    muEff, __ = getMuEff(mag, rEffArcsec, n)
+    muEff, __ = getMuEff(mag, rEff, n)
     _a = np.log(10)/(2.5*bn)
-    _b = muEff + 2.5*np.log10(axRat)
+    _b = muEff - 2.5*np.log10(axRat)
     rIso = rEff*((sbLim - _b)*_a + 1)**n
 
-    if len(mag) == 1:
-        rIsoPx = int(np.round(rIso/pxScale, 0))
-    else:
-        rIsoPx = np.array([int(np.round(i, 0)) for i in rIso])
-
-    return rIsoPx
+    return rIso

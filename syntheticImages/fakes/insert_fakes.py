@@ -16,6 +16,8 @@ from astropy.coordinates import SkyCoord
 from astropy.modeling.models import Legendre2D
 import numpy as np
 
+from fakes import sersic as srsc
+
 
 class ImageBuilder():
     '''
@@ -86,15 +88,20 @@ class ImageBuilder():
                     'CTYPE2': 'DEC--TAN',
                     'CRVAL1': self.raCen,
                     'CRVAL2': self.decCen,
-                    'CRPIX1': self.dimX//2,  # Center of image
-                    'CRPIX2': self.dimY//2,  # Center of image
+                    'CRPIX1': self.dimX/2,  # Center of image
+                    'CRPIX2': self.dimY/2,  # Center of image
                     'CD1_1': -pxScale,
                     'CD1_2': 0.0,
                     'CD2_1': 0.0,
-                    'CD2_2': pxScale}
+                    'CD2_2': pxScale,
+                    'NAXIS1': self.dimX,
+                    'NAXIS2': self.dimY,
+                    'CUNIT1': 'deg',
+                    'CUNIT2': 'deg',
+                    'EQUINOX': 2000.}
         self.w = WCS(wcs_dict)
 
-    def makePolyDict(self, fracDisplacement, random=False, seed=None):
+    def makePolyDict(self, fracDisplacement=0.05, random=False, seed=None):
         '''
         Generates sky polynomial coefficients, up to order 2
             Parameters
@@ -188,16 +195,17 @@ class ImageBuilder():
                            c2_0=self.polyDict['c2_0'],
                            c2_1=self.polyDict['c2_1'],
                            c2_2=self.polyDict['c2_2'])
-        try:
-            self.sky = m(X, Y)
-        except ValueError:
-            print("Coefficients yielded a sky with negative values!")
+        self.sky = m(X, Y)
         # Adding Poisson noise
         if seed is None:
             rng = np.random.default_rng()
         else:
             rng = np.random.default_rng(seed)
-        fish = rng.poisson(self.sky)
+        try:
+            fish = rng.poisson(self.sky)
+        except ValueError:
+            print('Coefficients yielded a sky with negative values.')
+            print('Poisson noise generation failed.')
         fish_amp = self.sky - fish
         self.sky += fish_amp
 
@@ -211,6 +219,7 @@ class ImageBuilder():
                 Size of dither, in pixels
             tol : `float'
                 Maximum amplitude in random offsets to dither points
+                Based on the image axis lengths, not ditherStep.
             n : `int'
                 Number of dithered exposures
 
@@ -221,16 +230,21 @@ class ImageBuilder():
                 in decimal degrees
         '''
         rng = np.random.default_rng()
-
+        longax = np.argmax(self.image.array.shape)
+        shortax = np.argmin(self.image.array.shape)
+        axfrac = self.image.array.shape[shortax] \
+            / self.image.array.shape[longax]
+        longtol = tol * axfrac
         # 9-point dither pattern baseline, top-left to bottom-right
-        cenx = self.image.array.shape[1]//2
-        ceny = self.image.array.shape[0]//2
+        # Defining "x" as the short axis by default
+        cenx = self.image.array.shape[shortax]//2
+        ceny = self.image.array.shape[longax]//2
         gridx = [cenx-ditherStep, cenx, cenx+ditherStep,
                  cenx-ditherStep, cenx, cenx+ditherStep,
                  cenx-ditherStep, cenx, cenx+ditherStep]
-        gridy = [ceny+ditherStep, cenx+ditherStep, cenx+ditherStep,
-                 cenx, cenx, cenx,
-                 cenx-ditherStep, cenx-ditherStep, cenx-ditherStep]
+        gridy = [ceny+ditherStep, ceny+ditherStep, ceny+ditherStep,
+                 ceny, ceny, ceny,
+                 ceny-ditherStep, ceny-ditherStep, ceny-ditherStep]
         pattern = list(zip(gridx, gridy))
         ra_cens = []
         dec_cens = []
@@ -238,11 +252,16 @@ class ImageBuilder():
         while i < n:
             for coo in pattern:
                 # Maximum tol% random offset in x and y from each position
-                # MAKE THIS AN INTEGER!  Then no need for partial pixel
-                # translations.
-                offsetx = rng.uniform(-1, 1) * self.image.array.shape[1] * tol
-                offsety = rng.uniform(-1, 1) * self.image.array.shape[0] * tol
-                image_pos = galsim.PositionD(coo[0]+offsetx, coo[1]+offsety)
+                # This is converted to an integer to avoid partial pixel
+                # translations in other steps
+                offsetx = rng.uniform(-1, 1) \
+                    * (self.image.array.shape[shortax] * tol)
+                offsety = rng.uniform(-1, 1) \
+                    * (self.image.array.shape[longax] * longtol)
+                offsetx = int(offsetx)
+                offsety = int(offsety)
+                image_pos = galsim.PositionD(coo[0]+offsetx,
+                                             coo[1]+offsety)
                 world_pos = self.image.wcs.toWorld(image_pos)
                 ra_cens.append(world_pos.ra.deg)
                 dec_cens.append(world_pos.dec.deg)
@@ -276,10 +295,11 @@ class ImageBuilder():
             self.image.addNoise(noise)
 
 
-class DrawModels(ImageBuilder):
+class DrawModels():
     '''
-    Class for populating images with models
-    Inherits ImageBuilder() class
+    Class for populating images with models.
+    Needs a coordinates for the models and an image on which to draw them
+    (created with ImageBuilder())
     '''
 
     def __init__(self, ra, dec, image):
@@ -369,7 +389,7 @@ class DrawModels(ImageBuilder):
         except galsim.errors.GalSimBoundsError:
             pass
 
-    def drawFullPsf(self, mag, psfPath, magZp=27.0):
+    def drawFullPsf(self, mag, psfPath, dimX=4096, dimY=2048, magZp=27.0):
         '''
         Uses a larger PSF model FITS image to create star models with wings
         PSF model must be normalized, such that sum(flux) == 1
@@ -379,6 +399,10 @@ class DrawModels(ImageBuilder):
                 Model star magnitude
             psfPath : `string`
                 Full path to normalized full PSF model, including filename
+            dimX : `int`
+                Image dimension in x-coordinate (px)
+            dimY : `int`
+                Image dimension in y-coordinate (px)
             magZp : TYPE, optional
                 Magnitude to flux zeropoint. The default is 27.0.
 
@@ -398,6 +422,10 @@ class DrawModels(ImageBuilder):
         flux = 10**(-0.4*(mag - magZp))
         psf *= flux  # Scaling to proper magnitude
         self.image_pos, self.image_posi, self.offset = self.convertCoords()
+        bad = (self.image_pos.x > dimX) | (self.image_pos.x < 0) \
+            | (self.image_pos.y > dimY) | (self.image_pos.y < 0)
+        if bad:
+            return  # Skips stars that are out of the frame
         try:
             psf = galsim.Image(psf, wcs=self.image.wcs.local(self.image_pos))
             stamp = psf
@@ -417,7 +445,7 @@ class DrawModels(ImageBuilder):
             Parameters
             ----------
             n : `float`
-                Sersic index (useful range is 0.5 -- 6)
+                Sersic index (useful range is 0.3 -- 6.2)
             rEff : `float'
                 Half-light radius, in pixels
             axRat : `float`
@@ -442,21 +470,35 @@ class DrawModels(ImageBuilder):
         NOTE: useful for drawing small objects, but for large ones use
         makeSersicStamp() function.  Takes a long while to draw the stamp.
         '''
+        assert (n >= 0.3) & (n <= 6.2),\
+            "Sersic index must be between 0.3 and  6.2"
+        assert rEff > 0, "Effective radius must be positive and non-zero!"
+        assert (axRat >= 0) & (axRat <= 1.0),\
+            "Axial ratio (b/a) must be between 0 and 1!"
+        assert (pa >= -360) & (pa <= 360),\
+            "Position angle must be in degrees.  Acceptable is -360 to 360"
+        assert (beta > 0), "Beta must be positive"
+        assert (fwhm >= 0), "FWHM must be 0 or positive"
+        assert stampWidth > 0, "Stamp width must be positive and non-zero"
         flux = 10**(-0.4*(mag - magZp))
-        sersic = galsim.Sersic(n, rEff)
-        sersic = sersic.shear(q=axRat, beta=((90 - pa)*galsim.degrees))
+        incl = np.arccos(axRat)
+        incl = galsim.Angle(incl, unit=galsim.radians)
+        sersic = galsim.InclinedSersic(n, incl, rEff)
         sersic = sersic.withFlux(flux)
+        sersic = sersic.rotate(galsim.Angle(pa, unit=galsim.degrees))
         bounds = galsim.BoundsI(1, stampWidth, 1, stampWidth)
         # Convolving w/PSF
         if fwhm != 0:
             psf = galsim.Moffat(beta=beta, fwhm=fwhm)
             sersic = galsim.Convolve([sersic, psf])
+        else:
+            pass
 
         image_pos, image_posi, offset = self.convertCoords()
         try:
             gal_im = sersic.drawImage(wcs=self.image.wcs.local(image_pos),
                                       offset=offset, bounds=bounds)
-        except (galsim.errors.GalSimFFTSizeError, MemoryError):
+        except (galsim.errors.GalSimFFTSizeError, MemoryError, TypeError):
             print('------------------')
             print('Memory error!')
             print('n: %.1f, mag: %.2f, Reff: %.2f' % (n, mag, rEff))
@@ -488,6 +530,11 @@ def get2MASSCatalogue(raCen, decCen, width):
         cat : `astropy.table.Table'
             Table with astroquery results for the search
     '''
+    assert width > 0, 'Search box width must be positive and non-zero'
+    assert (raCen >= 0) & (raCen <= 360), \
+        'Right ascension must be given in decimal degrees (0 -- 360)'
+    assert (decCen >= -90) & (decCen <= 90), \
+        'Declination must be given in decimal degrees (-90 -- 90)'
     Vizier.ROW_LIMIT = -1
     coord = SkyCoord(raCen, decCen, unit=(u.degree, u.degree), frame='icrs')
     width = str(width)+'d'
@@ -518,10 +565,15 @@ def getSDSSCatalogue(raCen, decCen, radius):
     Returns psfMags, which are in nanomaggies.  Need to offset by 22.5 to get
     back to ~AB magnitudes.
     '''
+    assert radius > 0, 'Search radius must be positive and non-zero'
+    assert (raCen >= 0) & (raCen <= 360), \
+        'Right ascension must be given in decimal degrees (0 -- 360)'
+    assert (decCen >= -90) & (decCen <= 90), \
+        'Declination must be given in decimal degrees (-90 -- 90)'
     coord = SkyCoord(raCen, decCen, unit=(u.degree, u.degree), frame='icrs')
     radius *= u.degree
     fields = ['ra', 'dec', 'psfMag_g', 'psfMag_r', 'psfMag_i']
-    cat = SDSS.query_region(coord, radius, fields=fields, data_release=15)
+    cat = SDSS.query_region(coord, radius, fields=fields, data_release=12)
 
     return cat
 
@@ -547,6 +599,11 @@ def getGamaCatalogue(raCen, decCen, width):
     (magnitude, effective radius, Sersic index, ellipticity, PA, and central
      surface brightness)
     '''
+    assert width > 0, 'Search box width must be positive and non-zero'
+    assert (raCen >= 0) & (raCen <= 360), \
+        'Right ascension must be given in decimal degrees (0 -- 360)'
+    assert (decCen >= -90) & (decCen <= 90), \
+        'Declination must be given in decimal degrees (-90 -- 90)'
     ra1 = str(raCen + width)
     ra2 = str(raCen - width)
     dec1 = str(decCen + width)
@@ -563,6 +620,31 @@ def getGamaCatalogue(raCen, decCen, width):
 
 
 def findCentralStar(ra, dec, starCatalogue, ditherStep, bWidth, pxScale=0.168):
+    '''
+    A function for building image stacks.  Under construction.
+
+        Parameters
+        ----------
+        ra : `float`
+            Right ascension in decimal degrees
+        dec : `float`
+            Declination in decimal degrees
+        starCatalogue : `astropy.table.table.Table`
+            Star catalogue from one of the above functions
+        ditherStep : `int`
+            Dither step size in pixels
+        bWidth : `int`
+            Search box width in pixels
+        pxScale : `float, optional
+            Pixel scale in arcsec/px. The default is 0.168.
+
+        Returns
+        -------
+        id_ra : `int`
+            Index in starCatalogue RA for the star of choice
+        id_dec : `int`
+            Index in starCatalogue Dec for the star of choice
+    '''
     angleStep = (ditherStep * pxScale) / 3600  # Degrees
     angleWidth = (bWidth * pxScale) / 3600  # Degrees
     want_ra = (starCatalogue['RAJ2000'] <= ra + angleStep - angleWidth/2) \
@@ -576,14 +658,12 @@ def findCentralStar(ra, dec, starCatalogue, ditherStep, bWidth, pxScale=0.168):
     return id_ra, id_dec
 
 
-def makeSersicStamp(ra, dec, n, rEff, axRat, pa, mag, beta, fwhm, stampName,
-                    magZp=27.0):
+def makeSersicStamp(n, rEff, axRat, pa, mag, beta, fwhm, stampName,
+                    muLim=32.5, magZp=31.4, pxScale=0.168):
     '''
     Same as DrawModels.drawSersic(), but write the stamp to the disk
         Parameters
         ----------
-        ra : `float`
-
         n : `float`
             Sersic index (useful range is 0.5 -- 6)
         rEff : `float'
@@ -600,28 +680,55 @@ def makeSersicStamp(ra, dec, n, rEff, axRat, pa, mag, beta, fwhm, stampName,
             PSF FWHM for convolution
         stampName : `string`
             Filename of output image
+        muLim : `float`
+            Limiting surface brightness out to which to draw the stamp
         magZp : `float`
             Magnitude zeropoint, to convert from mag to counts
+        pxScale : `float`
+            Desired image pixel scale, in arcseconds/px
 
         Returns
         -------
         Nothing--writes image to hard disk
     NOTE: use this for large Sersic models!
     '''
+    assert (n >= 0.3) & (n <= 6.2),\
+        "Sersic index must be between 0.3 and 6.2"
+    assert (rEff > 0), "Effective radius must be positive!"
+    assert (axRat >= 0) & (axRat <= 1.0),\
+        "Axial ratio (b/a) must be between 0 and 1"
+    assert (pa >= -360) & (pa <= 360),\
+        "Position angle must be in degrees.  -360 to 360 acceptable"
+    assert (beta > 0), "Beta must be positive."
+    assert (fwhm == 0) | (fwhm > 0),\
+        "FWHM must be either 0 or positive."
+    assert type(stampName) == str,\
+        "Please supply a valid path as the stamp name"
+    assert(pxScale > 0), "Pixel scale must be positive."
     flux = 10**(-0.4*(mag - magZp))
-    sersic = galsim.Sersic(n, rEff)
-    sersic = sersic.shear(q=axRat, beta=((90 - pa)*galsim.degrees))
+    incl = np.arccos(axRat)
+    incl = galsim.Angle(incl, unit=galsim.radians)
+    sersic = galsim.InclinedSersic(n, incl, half_light_radius=rEff)
     sersic = sersic.withFlux(flux)
+    sersic = sersic.rotate(galsim.Angle(pa, unit=galsim.degrees))
     # Convolving w/PSF
-    psf = galsim.Moffat(beta=beta, fwhm=fwhm)
-    sersic = galsim.Convolve([sersic, psf])
+    if fwhm != 0:
+        psf = galsim.Moffat(beta=beta, fwhm=fwhm)
+        sersic = galsim.Convolve([sersic, psf])
+    else:
+        print('0 FWHM supplied; skipping convolution....')
+    stampWidth = 2*srsc.sbLimWidth(mag, n, rEff, axRat, muLim)
+    stampWidth = int(np.round(stampWidth/pxScale, 0))
+    bounds = galsim.BoundsI(1, stampWidth, 1, stampWidth)
 
     try:
-        gal_im = sersic.drawImage(scale=0.168, method="real_space").array
+        gal_im = sersic.drawImage(scale=pxScale,
+                                  bounds=bounds,
+                                  method="real_space").array
     except (galsim.errors.GalSimFFTSizeError, MemoryError):
         print('Memory error!')
         return None
 
     hdu = fits.PrimaryHDU(gal_im)
     hdulist = fits.HDUList([hdu])
-    hdulist.writeto(stampName)
+    hdulist.writeto(stampName, overwrite=True)
