@@ -26,7 +26,7 @@ def makeHduList(image, header=None):
     Creates an HDUList object from an image array and a FITS header object
         Parameters
         ----------
-        image : `numpy.array`
+        image : `numpy.ndarray`
             Image data array
         header : `astropy.io.fits.Header`
             Header object to be included with the data array.
@@ -70,7 +70,7 @@ def getFnames(dirNm, prefix='fakes', prefixNoNoise='onlymodels'):
     return imList, imListNoNoise
 
 
-def makeBlankImage(raCen, decCen, size, pxScale):
+def makeBlankImage(raCen, decCen, size, pxScale=0.168):
     '''
     Creates a blank image HDU with a WCS
         Parameters
@@ -81,19 +81,21 @@ def makeBlankImage(raCen, decCen, size, pxScale):
             Central pixel reference declination, in decimal degrees
         size : `int`
             Width of blank image in pixels
+        pxScale : `float`
+            Pixel scale, in arcsec/px, for the blank image
 
         Returns
         -------
-        blankImage : `astropy.io.fits.hdu.image.PrimaryHDU`
+        blankHdu : `astropy.io.fits.hdu.image.PrimaryHDU`
             Image HDU with given parameters, all zero data values
     '''
     dimX = size
     dimY = size
-    blnkIm = insfk.ImageBuilder(dimX, dimY, raCen, decCen, pxScale)
+    blnkIm = insfk.ImageBuilder(dimX, dimY, raCen, decCen, pxScale, {})
     hdu = fits.PrimaryHDU(blnkIm.image.array, header=blnkIm.w.to_header())
-    hdulist = fits.HDUList([hdu])
+    blankHdu = fits.HDUList([hdu])
 
-    return hdulist
+    return blankHdu
 
 
 def binImage(maskedHdu, block=9):
@@ -110,7 +112,28 @@ def binImage(maskedHdu, block=9):
         -------
         binnedHdu : `astropy.io.fits.hdu.image.PrimaryHDU`
             Binned image, with scaled WCS if applicable
+    NOTE: this doesn't allow for higher-order terms like PC3_J, PC4_J, etc.
     '''
+    assert block > 0, 'Binning factor must be positive and non-zero'
+    assert maskedHdu[0].header['NAXIS1'] == maskedHdu[0].data.shape[1], \
+        'Header mismatch or non-existent.  Image needs a header.'
+    assert ('PC1_1' in maskedHdu[0].header) \
+        | ('CD1_1' in maskedHdu[0].header), \
+        'WCS info in header must be in either PCI_J or CDI_J format.'
+
+    # First converting header to CDI_J format if not already there
+    keys = ['PC1_1', 'PC1_2', 'PC2_1', 'PC2_2']
+    for key in keys:
+        if key in maskedHdu[0].header:
+            cdKey = 'CD'+key[2:]
+            if key[2] == '1':
+                maskedHdu[0].header[cdKey] = maskedHdu[0].header[key] \
+                    * maskedHdu[0].header['CDELT1']
+            else:
+                maskedHdu[0].header[cdKey] = maskedHdu[0].header[key] \
+                    * maskedHdu[0].header['CDELT2']
+            maskedHdu[0].header.remove(key)
+
     # Shaving off excess pixels given bin size
     x_edge = np.shape(maskedHdu[0].data)[0] % block
     y_edge = np.shape(maskedHdu[0].data)[1] % block
@@ -145,7 +168,7 @@ def binImage(maskedHdu, block=9):
         bn_head['CD2_2'] = bn_head['CD2_2']*block
     if 'CD1_2' in bn_head:
         bn_head['CD1_2'] = bn_head['CD1_2']*block
-    if 'CD2_2' in bn_head:
+    if 'CD2_1' in bn_head:
         bn_head['CD2_1'] = bn_head['CD2_1']*block
 
     hdu = fits.PrimaryHDU(binned, header=bn_head)
@@ -182,34 +205,6 @@ def maskToLimit(imageNoSky, sbLim, magZp, pxScale=0.168):
     return maskImage
 
 
-def createNCMask(imagePath, prefix='fakes', commands=''):
-    '''
-    Creates a mask file by running GNUAstro package NoiseChisel on the
-    image provided
-        Parameters
-        ----------
-        imagePath : `string`
-            Full path to image you want masked
-        prefix : `string`
-            Common image name prefix prior to wildcard
-        commands : `string`
-            Additional desired commands to be used by astnoisechisel
-
-        Returns
-        -------
-        ncDetections : `numpy.array`
-            Detection map from Noisechisel, 1==masked, 0==not masked
-
-    '''
-    imName = imagePath[imagePath.find(prefix):]
-    os.system('astnoisechisel '+imagePath+' -h0 --rawoutput '+commands)
-
-    ncCube = fits.open(imName[:-5]+'_detected.fits')
-    ncDetections = ncCube[1].data
-
-    return ncDetections
-
-
 def legendreSkySub(polyOrder, maskedImage, bnFac, maskVal=np.nan, full=False):
     '''
     Models and subtracts the sky using Legendre polynomials
@@ -228,7 +223,7 @@ def legendreSkySub(polyOrder, maskedImage, bnFac, maskVal=np.nan, full=False):
 
         Returns
         -------
-        skyModel : `numpy.array`
+        skyModel : `numpy.ndarray`
             Best-fit sky model image
         m : `astropy.modeling.FittableModel`
             Model fit with full parameters

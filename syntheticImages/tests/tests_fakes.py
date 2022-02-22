@@ -5,12 +5,11 @@ Created on Thu Jan 27 09:23:01 2022
 
 @author: awatkins
 
-Unit tests for insert_fakes.py
+Unit tests for insert_fakes.py's two major classes.
 """
 import galsim
 import astropy
 import numpy as np
-import pytest
 
 
 def test_fakes_instance():
