@@ -89,6 +89,14 @@ def makeBlankImage(raCen, decCen, size, pxScale=0.168):
         blankHdu : `astropy.io.fits.hdu.image.PrimaryHDU`
             Image HDU with given parameters, all zero data values
     '''
+    assert (raCen >= 0) & (raCen <= 360), \
+        'Invalid RA: use decimal degrees.'
+    assert (decCen >= -90) & (decCen <= 90), \
+        'Invalid Dec: use decimal degrees.'
+    assert size > 0, \
+        'Size must be finite and non-zero'
+    assert pxScale > 0, \
+        'pxScale must be finite and non-zero'
     dimX = size
     dimY = size
     blnkIm = insfk.ImageBuilder(dimX, dimY, raCen, decCen, pxScale, {})
@@ -213,51 +221,67 @@ def legendreSkySub(polyOrder, maskedImage, bnFac, maskVal=np.nan, full=False):
         polyOrder : `int`
             Order of desired Legendre polynomial fit to the image background
         maskedImage : `astropy.io.fits.hdu.image.PrimaryHDU`
-            Binned image with masked pixels
+            HDUList of input image, with mask applied via maskVal
         bnFac : `int`
-            Binning factor applied to maskedImage (more binning speeds this up)
+            Binning factor to be applied to maskedImage before fitting sky
         maskVal : `float`
-            Pixel value corresponding to mask in maskImage (defaults to np.nan)
+            Pixel value corresponding to mask in maskedImage
+            (Defaults to np.nan)
         full : `bool`
             If True, returns the parameters of the fit as well
 
         Returns
         -------
         skyModel : `numpy.ndarray`
-            Best-fit sky model image
+            Best-fit sky model image, at native resolution
         m : `astropy.modeling.FittableModel`
-            Model fit with full parameters
+            Model fit with full parameters (accessed via m.c0_0, m.c1_0, etc.)
     '''
+    assert type(maskedImage) == fits.hdu.hdulist.HDUList, \
+        'Input masked image must be an HDUList, with a header'
+    assert (polyOrder >= 0), \
+        'Polynomial order must be 0 or positive'
+    assert (bnFac > 0), \
+        'Bin factor must be > 0'
+    zeros = maskedImage[0].data == 0
+    assert len(zeros[~zeros]) != 0, \
+        'Image is all 0s; cannot hope to fit a blank image.'
+
     m_init = Legendre2D(polyOrder, polyOrder)
     fit = LevMarLSQFitter()
 
-    bnx = np.arange(bnFac//2+1, maskedImage[0].data.shape[1]*bnFac, bnFac)
-    bny = np.arange(bnFac//2+1, maskedImage[0].data.shape[0]*bnFac, bnFac)
+    try:
+        binnedImage = binImage(maskedImage, bnFac)
+    except AssertionError:
+        print('maskedImage must have a valid WCS header to bin!')
+        return
+    bnx = np.arange(bnFac//2+1, binnedImage[0].data.shape[1]*bnFac, bnFac)
+    bny = np.arange(bnFac//2+1, binnedImage[0].data.shape[0]*bnFac, bnFac)
     bnX, bnY = np.meshgrid(bnx, bny)
-    _sky = np.nanmedian(maskedImage[0].data[maskedImage[0].data != maskVal])
-    _dsky = np.nanstd(maskedImage[0].data[maskedImage[0].data != maskVal])
+    _sky = np.nanmedian(binnedImage[0].data[binnedImage[0].data != maskVal])
+    _dsky = np.nanstd(binnedImage[0].data[binnedImage[0].data != maskVal])
 
     # Accepting only pixels within 3 standard deviations of background
-    good = (maskedImage[0].data > _sky-3*_dsky) & \
-           (maskedImage[0].data < _sky+3*_dsky)
+    good = (binnedImage[0].data > _sky-3*_dsky) & \
+           (binnedImage[0].data < _sky+3*_dsky)
 
     # Fitter can't handle np.nan
-    maskedImage[0].data[np.isnan(maskedImage[0].data)] = -999
+    binnedImage[0].data[np.isnan(binnedImage[0].data)] = -999
 
     # Rejecting outliers; 3 rounds 3 sigma rejection
     for i in range(3):
-        m = fit(m_init, bnX, bnY, maskedImage[0].data, weights=good)
+        m = fit(m_init, bnX, bnY, binnedImage[0].data, weights=good)
         scatter = np.nanstd(m(bnX[good], bnY[good])
-                            - maskedImage[0].data[good])
-        diff = maskedImage[0].data - m(bnX, bnY)
+                            - binnedImage[0].data[good])
+        diff = binnedImage[0].data - m(bnX, bnY)
         good = good & (np.abs(diff) < (3 * scatter))
         m_init = m
 
     # Doing final fit and sky subtraction
-    x = np.arange(1, maskedImage[0].data.shape[1]*bnFac+1)
-    y = np.arange(1, maskedImage[0].data.shape[0]*bnFac+1)
+    x = np.arange(1, maskedImage[0].data.shape[1]+1)
+    y = np.arange(1, maskedImage[0].data.shape[0]+1)
     X, Y = np.meshgrid(x, y)
-    m = fit(m_init, bnX, bnY, maskedImage[0].data, weights=good)
+    m = fit(m_init, bnX, bnY, binnedImage[0].data, weights=good)
     skyModel = m(X, Y)
 
     if full:
@@ -267,86 +291,148 @@ def legendreSkySub(polyOrder, maskedImage, bnFac, maskVal=np.nan, full=False):
         return skyModel
 
 
-def coaddImages(imList, blankImage, bWidth, prefix='s_fakes', writeIms=False):
+def coaddImages(raCen, decCen, size, imDict, offsets, pxScale=0.168,
+                prefix='', outputDir='.', writeIms=False):
     '''
     Registers and median coadds all images using a blank reference image
         Parameters
         ----------
-        imList : `list`
-            List of image filenames
-        blankImage : `astropy.io.fits.hdu.image.PrimaryHDU`
-            All zero image w/WCS, image on which to register all others
+        raCen : `float`
+            Central pixel reference right ascension, in decimal degrees
+        decCen : `float`
+            Central pixel reference declination, in decimal degrees
+        size : `int`
+            Width of blank image in pixels
+        imDict : `list`
+            Dictionary containing image data for all images to be combined
+        offsets : `list`
+            List of (dx, dy) offsets from field center in px.  Returned from
+            fakes.insert_fakes.ImageBuilder.ditheredCoordinates()
+        pxScale : `float`
+            Pixel scale, in arcsec/px, for the blank image on which to register
+            the other images
         prefix : `string`
-            Common image name prefix prior to wildcard
+            Image prefix appended to registered images if writeIms == True
+        outputDir : `string`
+            Path to directory in which to write registered image files if
+            writeIms == True
         writeIms : `bool`
-            If True, will write registered images to the disk
+            If True, will write registered images to the disk in addition to
+            the coadded image itself
 
         Returns
         -------
         coaddHdu : `astropy.io.fits.hdu.image.PrimaryHDU`
             Images coadded onto the reference blankImage, with header
-
-        shifts : `list`
-            List of tuples giving shifts in y and then x used to align images
     '''
+    assert type(imDict) == dict, \
+        'Image list must be a dictionary containing image HDU objects'
+    keys = list(imDict.keys())
+    assert type(imDict[keys[0]]) == fits.hdu.hdulist.HDUList, \
+        'Images in imDict must be of type HDUList'
+    assert type(prefix) == str
+    assert type(outputDir) == str
+    assert type(offsets) == list, \
+        'Offsets must be in list format: [(dx1, dy1), (dx2, dy2), ...]'
+    assert type(offsets[0]) == tuple, \
+        'Offsets must be in list format: [(dx1, dy1), (dx2, dy2), ...]'
+    for i in offsets:
+        assert np.round(i[0], 0) == i[0], \
+            'Offsets must be integers!'
+        assert np.round(i[1], 0) == i[1], \
+            'Offsets must be integers!'
+
+    blankImage = makeBlankImage(raCen, decCen, size, pxScale)
+    # Checking that raCen, decCen corresponds to the same field center used
+    # to produce the dithered offsets, so partial pixels are not involved.
+    dxTst = imDict[keys[0]][0].header['CRPIX1'] \
+        - blankImage[0].header['CRPIX1']
+    assert np.round(dxTst, 0) == dxTst, \
+        'Non-integer offset from field center found.  Did you use the same' \
+        + ' RA, Dec as the chosen field center?'
     allIms = []
-    shifts = []
-    for im in imList:
-        print('Registering image '+im)
-        image = fits.open(im)
-        fnm = im[im.find(prefix):]
-        dirnm = im[:im.find(prefix)]
+    for i, im in enumerate(imDict.keys()):
+        try:
+            print('Registering image ' + im + ' of ', len(imDict))
+        except TypeError:
+            print('Registering image %i' % (im) + ' of ', len(imDict))
+        image = imDict[im]
 
-        star_x = image[0].header['STAR_X']
-        star_y = image[0].header['STAR_Y']
-        w1 = WCS(image[0].header)
-        w2 = WCS(blankImage[0].header)
-        star_ra, star_dec = w1.all_pix2world(star_x, star_y, 1)
-        ref_x, ref_y = w2.all_world2pix(star_ra, star_dec, 1)
-        dx = ref_x - star_x
-        dy = ref_y - star_y
-        shifts.append((dy, dx))
+        # Inject image into the right place on the blank image
+        proj_im = blankImage[0].data * 0.0 + np.nan
+        left_edge = (size//2) - (image[0].data.shape[1]//2 - offsets[i][0])
+        bottom_edge = (size//2) - (image[0].data.shape[0]//2 - offsets[i][1])
 
-        proj_im = np.ndarray.copy(blankImage[0].data)
-        proj_im[: image[0].data.shape[0],
-                : image[0].data.shape[1]] = image[0].data
-        proj_im = ndimage.shift(proj_im, [dy, dx], order=5)
+        proj_im[bottom_edge: bottom_edge + image[0].data.shape[0],
+                left_edge: left_edge + image[0].data.shape[1]] \
+            = image[0].data
+
         allIms.append(proj_im)
         if writeIms:
-            ut.write_im_head(proj_im, blankImage[0].header, dirnm+'W'+fnm)
+            ut.write_im_head(proj_im, blankImage[0].header,
+                             outputDir+'/'+prefix+'fakes'+str(i)+'.fits')
 
     coadd = np.nanmedian(allIms, axis=0)
     hdu = fits.PrimaryHDU(coadd, header=blankImage[0].header)
     coaddHdu = fits.HDUList([hdu])
 
-    return coaddHdu, shifts
+    return coaddHdu
 
 
-def coaddSubtraction(image, shift, coadd):
+def coaddSubtraction(image, offset, coadd, scaleFac=1.0):
     '''
-    Aligns and subtracts the coadd from an individual image
+    Aligns, flux-scales, and subtracts the coadd from an individual image
         Parameters
         ----------
         image : `astropy.io.fits.hdu.image.PrimaryHDU`
             Image from which the coadd is to be subtracted
-        shifts : `tuple`
+        offset : `tuple`
             Image shift used to reverse the coadd, (dx, dy)
         coadd : `astropy.io.fits.hdu.image.PrimaryHDU`
             The coadd to subtract from the image
+        scaleFac : `float`
+            Amount by which to multiple the coadd before subtraction, to match
+            to the individual exposure's zeropoint
 
         Returns
         -------
         diffImage : `astropy.io.fits.hdu.image.PrimaryHDU`
             The coadd-subtracted image
     '''
-    reproj_coadd = ndimage.shift(coadd[0].data,
-                                 [-shift[0], -shift[1]],
-                                 order=5)
-    reproj_coadd = reproj_coadd[: image[0].data.shape[0],
-                                : image[0].data.shape[1]]
+    assert type(image) == fits.hdu.hdulist.HDUList, \
+        'Input image must be of type HDUList'
+    assert type(coadd) == fits.hdu.hdulist.HDUList, \
+        'Coadd image must be of type HDUList'
+    assert type(offset) == tuple, \
+        'Offset must be in tuple format: (dx, dy)'
+    assert np.round(offset[0], 0) == offset[0], \
+        'Offsets must be integers!'
+    assert np.round(offset[1], 0) == offset[1], \
+        'Offsets must be integers!'
 
-    # Scale factor derivation goes here, using a separate function
-    scaleFac = 1.0
+    # Setting up some quantities
+    size = coadd[0].data.shape[0]  # Always a square
+    image_x = image[0].data.shape[1]
+    image_y = image[0].data.shape[0]
+
+    # Uses 0 order shift, as these all should be integers
+    # Moves the image section to the coadd center
+    reproj_coadd = ndimage.shift(coadd[0].data,
+                                 [-offset[1], -offset[0]],
+                                 order=0, cval=np.nan)
+    # Then take only the center slice with the image dimensions
+    if image_y % 2 == 0:
+        reproj_coadd = reproj_coadd[size//2 - image_y//2: size//2 + image_y//2,
+                                    size//2 - image_x//2: size//2 + image_x//2]
+    # int(0.5) == 1 in Python, so odd numbers go up by 1
+    else:
+        reproj_coadd = reproj_coadd[size//2 - image_y//2:
+                                    size//2 + image_y//2 + 1,
+                                    size//2 - image_x//2:
+                                        size//2 + image_x//2]
+
+    # Scaling the flux to the individual exposure via scaleFactor
+    # Derive this separately
     reproj_coadd *= scaleFac
     diffData = image[0].data - reproj_coadd
 
@@ -356,16 +442,16 @@ def coaddSubtraction(image, shift, coadd):
     return diffImage
 
 
-def makeSkyMap(imageHdu, binnedHdu, sigma=1.0, block=9):
+def makeSkyMap(skyImage, binnedHdu, sigma=1.0, block=9):
     '''
     Fills flux in binned image across masks using inpainting, applies a lowpass
     filter, then enlarges image to original size
         Parameters
         ----------
-        diffImage : `astropy.io.fits.hdu.image.PrimaryHDU`
-            The coadd-subtracted image
+        skyImage : `astropy.io.fits.hdu.image.PrimaryHDU`
+            The standard resolution coadd-subtracted image HDUList
         binnedHdu : `astropy.io.fits.hdu.image.PrimaryHDU`
-            Binned image to be inpainted
+            Masked, binned image HDUList to be inpainted
         sigma : `float`
             Standard deviation of Gaussian kernel used for lowpass filtering
         block : `int`
@@ -374,10 +460,21 @@ def makeSkyMap(imageHdu, binnedHdu, sigma=1.0, block=9):
         Returns
         -------
         skyMap : `astropy.io.fits.hdu.image.PrimaryHDU`
-            Smooth maps of the sky
+            Smooth, mostly noiseless version of skyImage
     '''
-    x_edge = np.shape(imageHdu[0].data)[0] % block
-    y_edge = np.shape(imageHdu[0].data)[1] % block
+    assert type(skyImage) == fits.hdu.hdulist.HDUList, \
+        'Input image must be of type HDUList'
+    assert type(binnedHdu) == fits.hdu.hdulist.HDUList, \
+        'Input binned image must be of type HDUList'
+    assert sigma > 0, 'Gaussian kernel standard deviation must be positive'
+    assert block > 0, 'Bin factor must be positive'
+    assert type(block) == int, 'Bin factor must be an integer value'
+
+    y_edge = np.shape(skyImage[0].data)[0] % block
+    x_edge = np.shape(skyImage[0].data)[1] % block
+    if (x_edge != 0) | (y_edge != 0):
+        print('Warning!  Image dimensions not evenly divisible by bin factor.')
+        print('Strange things might occur at the image edges.')
 
     # Interpolate flux across masks using Inpainting technique
     bn_msk = np.isnan(binnedHdu[0].data)
@@ -392,9 +489,9 @@ def makeSkyMap(imageHdu, binnedHdu, sigma=1.0, block=9):
                                 interpolation=cv2.INTER_LANCZOS4)
 
     # Extrapolates missing pixel values from the binned image edges
-    skyMap = np.zeros(imageHdu[0].data.shape) + np.nan
-    skyMap[x_edge:, y_edge:] = enlarged_image
-    skyMap[:x_edge, :] = skyMap[x_edge:2*x_edge, :]
-    skyMap[:, :y_edge] = skyMap[:, y_edge:2*y_edge]
+    skyMap = np.zeros(skyImage[0].data.shape) + np.nan
+    skyMap[y_edge:, x_edge:] = enlarged_image
+    skyMap[:y_edge, :] = skyMap[y_edge:2*y_edge, :]
+    skyMap[:, :x_edge] = skyMap[:, x_edge:2*x_edge]
 
     return skyMap

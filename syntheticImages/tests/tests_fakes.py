@@ -191,7 +191,7 @@ def test_ditheredCoordinates():
     n = 500  # Need a large number of tests
 
     im = ImageBuilder(dimX, dimY, raCen, decCen, pxScale, polyDict, noise)
-    centers = im.ditheredCoordinates(ditherStep, tol, n)
+    centers, __ = im.ditheredCoordinates(ditherStep, tol, n)
     cens_deg = [galsim.CelestialCoord(i[0]*galsim.degrees, i[1]*galsim.degrees)
                 for i in centers]
     cens_xy = [im.image.wcs.toImage(i) for i in cens_deg]

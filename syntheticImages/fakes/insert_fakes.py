@@ -225,9 +225,11 @@ class ImageBuilder():
 
             Returns
             -------
-            centers : `list'
+            centers : `list`
                 List of image center coordinate pairs (tuples) in (RA, Dec),
                 in decimal degrees
+            offsets : `list`
+                List of x,y offsets (tuples) in px.  For easier coaddition.
         '''
         rng = np.random.default_rng()
         longax = np.argmax(self.image.array.shape)
@@ -248,6 +250,8 @@ class ImageBuilder():
         pattern = list(zip(gridx, gridy))
         ra_cens = []
         dec_cens = []
+        x_offset = []
+        y_offset = []
         i = 0
         while i < n:
             for coo in pattern:
@@ -260,6 +264,8 @@ class ImageBuilder():
                     * (self.image.array.shape[longax] * longtol)
                 offsetx = int(offsetx)
                 offsety = int(offsety)
+                x_offset.append(offsetx)
+                y_offset.append(offsety)
                 image_pos = galsim.PositionD(coo[0]+offsetx,
                                              coo[1]+offsety)
                 world_pos = self.image.wcs.toWorld(image_pos)
@@ -270,7 +276,8 @@ class ImageBuilder():
                     break
 
         centers = list(zip(ra_cens, dec_cens))
-        return centers
+        offsets = list(zip(x_offset, y_offset))
+        return centers, offsets
 
     def makeImage(self, noise=None):
         '''
@@ -414,9 +421,6 @@ class DrawModels():
         While this can be broadened via convolution, it cannot easily be
         narrowed.  E.G., the Montes et al. (2021) HSC PSF model has
         FWHM = 1.07".
-
-        ALSO: at the moment, partial pixel shift is not in place, so image
-        coaddition will not work quite right.
         '''
         psf = fits.getdata(psfPath)
         flux = 10**(-0.4*(mag - magZp))
