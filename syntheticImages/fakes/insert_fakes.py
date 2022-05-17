@@ -721,7 +721,7 @@ def makeSersicStamp(n, rEff, axRat, pa, mag, beta, fwhm, stampName,
         sersic = galsim.Convolve([sersic, psf])
     else:
         print('0 FWHM supplied; skipping convolution....')
-    stampWidth = 2*srsc.sbLimWidth(mag, n, rEff, axRat, muLim)
+    stampWidth = 2*srsc.sbLimWidth(mag, rEff, n, axRat, muLim)
     stampWidth = int(np.round(stampWidth/pxScale, 0))
     bounds = galsim.BoundsI(1, stampWidth, 1, stampWidth)
 
