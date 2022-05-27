@@ -7,74 +7,96 @@ def bnn(n, frac):
     Derives Sersic bn parameter for given light fraction
         Parameters
         ----------
-        n : `float`
+        n : `float` or `numpy.ndarray`
             Sersic index
         frac : `float`
             Light fraction, e.g. 0.5
 
         Returns
         -------
-        gammaincinv(2*n, frac) : `float`
+        bN : `float`
             Value of bn for given n and light fraction
     '''
-    return gammaincinv(2*n, frac)
+    assert np.all(n > 0), 'Sersic index must be positive and non-zero'
+    assert (frac > 0) & (frac <= 1), \
+        'Fraction must be between 0 and 1'
+
+    bN = gammaincinv(2*n, frac)
+
+    return bN
+
+
+def getMuEffAv(mag, rEff):
+    '''
+    Derives average surface brightness within 1 effective radius
+        Parameters
+        ----------
+        mag : `float` or `numpy.ndarray`
+            Total magnitude
+        rEff : `float` or `numpy.ndarray`
+            Half-light (effective) radius in arcseconds
+
+        Returns
+        -------
+        muEffAv : `float` or `numpy.ndarray`
+            Average surface brightness within rEff
+    '''
+    assert np.all(rEff > 0), 'Half-light radius must be positive and non-zero'
+    muEffAv = mag + 2.5*np.log10(2*np.pi*rEff**2)
+
+    return muEffAv
 
 
 def getMuEff(mag, rEff, n):
     '''
-    Derives effective surface brightnesses for a given
-    set of model parameters
+    Derives surface brightness at the effective radius
         Parameters
         ----------
-        mag : `float`
-            Model magnitude
-        rEff : `float`
-            Model effective radius in arcsec
-        n : `float`
-            Model Sersic index
+        mag : `float` or `numpy.ndarray`
+            Total magnitude
+        rEff : `float` or `numpy.ndarray`
+            Half-light (effective) radius in arcseconds
+        n : `float` or `numpy.ndarray`
+            Sersic index
 
         Returns
         -------
-        muEff : `float`
+        muEff : `float` or `numpy.ndarray`
             Surface brightness at the effective radius
-        muEffAv : `float`
-            Mean surface brightness within 1Reff
     '''
+    assert np.all(rEff > 0), 'Half-light radius must be positive and non-zero'
+    assert np.all(n > 0), 'Sersic index must be positive and non-zero'
     fn = (n*np.exp(bnn(n, 0.5))*gamma(2*n))/(bnn(n, 0.5)**(2*n))
-    muEffAv = mag + 2.5*np.log10(2*np.pi*rEff**2)
+    muEffAv = getMuEffAv(mag, rEff)
     muEff = muEffAv + 2.5*np.log10(fn)
 
-    return muEff, muEffAv
+    return muEff
 
 
-def getMu0(mag, rEff, n, magZp=21.0967):
+def getMu0(mag, rEff, n):
     '''
-    Derives central surface brightness for a given
-    set of model parameters
+    Derives central surface brightness
 
         Parameters
         ----------
-        mag : `float`
-            Model magnitude
-        rEff : `float`
-            Model effective radius in arcsec
-        n : `float`
-            Model Sersic index
-        magZp : `float`
-            Photometric zeropoint of mag
-            Default is for the S4G AB magnitudes
+        mag : `float` or `numpy.ndarray`
+            Total magnitude
+        rEff : `float` or `numpy.ndarray`
+            Half-light (effective) radius in arcseconds
+        n : `float` or `numpy.ndarray`
+            Sersic index
 
         Returns
         -------
-        mu0 : `numpy.ndarray`
-            Central surface brightness in units of
-            mag/arcsec^2
+        mu0 : `float` or `numpy.ndarray`
+            Central surface brightness in units of mag/arcsec^2
     '''
+    assert np.all(rEff > 0), 'Half-light radius must be positive and non-zero'
+    assert np.all(n > 0), 'Sersic index must be positive and non-zero'
     b = bnn(n, 0.5)
-    lTot = 10**(-0.4*(mag-magZp))
-    i0 = (lTot*(b**(2*n))) \
-        / (gamma(2*n)*2*n*np.pi*rEff**2)
-    mu0 = -2.5*np.log10(i0) + magZp
+    lTot = 10**(-0.4*mag)
+    i0 = (lTot*(b**(2*n))) / (gamma(2*n)*2*n*np.pi*rEff**2)
+    mu0 = -2.5*np.log10(i0)
 
     return mu0
 
@@ -86,11 +108,11 @@ def getSersicRadProf(mag, rEff, n, maxR, pxScale):
         Parameters
         ----------
         mag : `float`
-            Model magnitude
+            Total magnitude
         rEff : `float`
-            Model effective radius in arcsec
+            Half-light (effective) radius in arcseconds
         n : `float`
-            Model Sersic index
+            Sersic index
         maxR : `float`
             Maximum radius of model profile, in pixels
         pxScale : `float`
@@ -103,7 +125,16 @@ def getSersicRadProf(mag, rEff, n, maxR, pxScale):
         muR : `numpy.array`
             Surface brightness array out to maxR
     '''
-    muEff, __ = getMuEff(mag, rEff, n)
+    assert rEff > 0, \
+        'Half-light radius must be positive, non-zero, and not an array'
+    assert n > 0, \
+        'Sersic index must be positive, non-zero, and not an array'
+    assert maxR > 0, \
+        'Maximum radius must be positive, non-zero, and not an array'
+    assert pxScale > 0, \
+        'Pixel scale must be positive, non-zero, and not an array'
+
+    muEff = getMuEff(mag, rEff, n)
     bn = bnn(n, 0.5)
 
     rad = np.arange(0, maxR+1, 1)*pxScale
@@ -113,36 +144,40 @@ def getSersicRadProf(mag, rEff, n, maxR, pxScale):
     return rad, muR
 
 
-def sbLimWidth(mag, n, rEff, axRat, sbLim):
+def sbLimWidth(mag, rEff, n, axRat, sbLim):
     '''
     Derives an isophotal radius for a projected Sersic profile, which can be
     used to determine an appropriate stamp width
 
         Parameters
         ----------
-        mag : `float'
-            Object magnitude, to be converted into counts
-        n : `float`
-            Sersic index (useful range is 0.5 -- 6)
-        rEff : `float'
-            Half-light radius, in arcseconds
-        axRat : `float`
+        mag : `float' or `numpy.ndarray`
+            Total magnitude
+        rEff : `float' or `numpy.ndarray`
+            Half-light (effective) radius in arcseconds
+        n : `float` or `numpy.ndarray`
+            Sersic index
+        axRat : `float` or `numpy.ndarray`
             Projected axis ratio (values between 0 and 1)
         sbLim : `float`
             Desired surface brightness at which to truncate the model
         Returns
         -------
-        rIsoPx : `int`
+        rIso : `float`
             Width of the stamp that limits the model to sbLim in surface
             brightness, in arcseconds
 
     NOTE: current implementation is a bit crude, as it assumes the model PA
     is multiples of 90 degrees.  Will underestimate if it's between those.
     '''
+    assert np.all(rEff > 0), 'Half-light radius must be positive and non-zero'
+    assert np.all(n > 0), 'Sersic index must be positive and non-zero'
+    assert np.all(axRat > 0) & np.all(axRat <= 1), \
+        'Axial ratio must have a value between 0 and 1'
     bn = bnn(n, 0.5)
-    muEff, __ = getMuEff(mag, rEff, n)
+    muEff = getMuEff(mag, rEff, n)  # Face-on
     _a = np.log(10)/(2.5*bn)
-    _b = muEff - 2.5*np.log10(axRat)
+    _b = muEff + 2.5*np.log10(axRat)  # Projecting the profile
     rIso = rEff*((sbLim - _b)*_a + 1)**n
 
     return rIso

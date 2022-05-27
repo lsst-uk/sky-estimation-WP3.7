@@ -5,12 +5,11 @@ Created on Thu Jan 27 09:23:01 2022
 
 @author: awatkins
 
-Unit tests for insert_fakes.py
+Unit tests for insert_fakes.py's two major classes.
 """
 import galsim
 import astropy
 import numpy as np
-import pytest
 
 
 def test_fakes_instance():
@@ -192,7 +191,7 @@ def test_ditheredCoordinates():
     n = 500  # Need a large number of tests
 
     im = ImageBuilder(dimX, dimY, raCen, decCen, pxScale, polyDict, noise)
-    centers = im.ditheredCoordinates(ditherStep, tol, n)
+    centers, __ = im.ditheredCoordinates(ditherStep, tol, n)
     cens_deg = [galsim.CelestialCoord(i[0]*galsim.degrees, i[1]*galsim.degrees)
                 for i in centers]
     cens_xy = [im.image.wcs.toImage(i) for i in cens_deg]

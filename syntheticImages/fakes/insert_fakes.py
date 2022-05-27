@@ -5,6 +5,7 @@ Software to generate fake images with model stars and galaxies as well as
 noisy model skies.
 '''
 import math
+import copy
 import galsim
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -64,9 +65,13 @@ class ImageBuilder():
         self.dimY = dimY
         self.raCen = raCen
         self.decCen = decCen
+        self.pxScale = pxScale
+        self.noise = noise
         self.createWcs(pxScale)
         self.makeImage(noise)
-        self.polyDict = polyDict
+        self.polyDict = copy.deepcopy(polyDict)
+        # Making WCS into a header
+        self.header = self.w.to_header()
 
     def createWcs(self, pxScale):
         '''
@@ -122,7 +127,8 @@ class ImageBuilder():
             terms, up to c2_2
 
         '''
-        assert fracDisplacement > 0, "Displacement must be a positive number"
+        assert fracDisplacement >= 0, \
+            "Displacement must be a positive number or zero"
         all_keys = ['c0_0', 'c0_1', 'c0_2',
                     'c1_0', 'c1_1', 'c1_2',
                     'c2_0', 'c2_1', 'c2_2']
@@ -137,8 +143,14 @@ class ImageBuilder():
                     self.polyDict[key] = 0
                 else:
                     self.polyDict[key] += rng.normal(0,
-                                                     self.polyDict[key]
+                                                     np.abs(self.polyDict[key])
                                                      * fracDisplacement)
+                    # Flip a coin to swap orientation on some cross terms
+                    # if key[1] != key[3]:
+                    if (key[1] != '0') & (key[3] != '0'):
+                        coin = rng.integers(0, 2)
+                        if coin:
+                            self.polyDict[key] = -self.polyDict[key]
         else:
             for key in all_keys:
                 if key not in self.polyDict:
@@ -167,6 +179,8 @@ class ImageBuilder():
             -------
             self.sky : `numpy.array'
                 Image of polynomial sky pattern
+            self.poisson : `numpy.array`
+                Image of Poisson noise only, for testing purposes
         '''
         assert (polyDeg == 0) | (polyDeg == 1) | (polyDeg == 2),\
             "Polynomial order must be 0, 1, or 2"
@@ -208,8 +222,13 @@ class ImageBuilder():
             print('Poisson noise generation failed.')
         fish_amp = self.sky - fish
         self.sky += fish_amp
+        self.poisson = fish_amp
 
-    def ditheredCoordinates(self, ditherStep=100, tol=0.1, n=36):
+        # Adding the coefficients into the image header
+        for key in self.polyDict:
+            self.header[key] = self.polyDict[key]
+
+    def ditheredCoordinates(self, ditherStep=100, tol=0.1):
         '''
         Calculates the centers of semi-randomly dithered exposures centered at
         (self.raCen, self.decCen), using a 9-point dither pattern as a baseline
@@ -220,14 +239,13 @@ class ImageBuilder():
             tol : `float'
                 Maximum amplitude in random offsets to dither points
                 Based on the image axis lengths, not ditherStep.
-            n : `int'
-                Number of dithered exposures
 
             Returns
             -------
-            centers : `list'
-                List of image center coordinate pairs (tuples) in (RA, Dec),
-                in decimal degrees
+            self.offset : `tuple`
+                Offsets in x,y, for easier coaddition.
+
+            Updates self.raCen, self.decCen with new coordinates
         '''
         rng = np.random.default_rng()
         longax = np.argmax(self.image.array.shape)
@@ -245,32 +263,35 @@ class ImageBuilder():
         gridy = [ceny+ditherStep, ceny+ditherStep, ceny+ditherStep,
                  ceny, ceny, ceny,
                  ceny-ditherStep, ceny-ditherStep, ceny-ditherStep]
-        pattern = list(zip(gridx, gridy))
-        ra_cens = []
-        dec_cens = []
-        i = 0
-        while i < n:
-            for coo in pattern:
-                # Maximum tol% random offset in x and y from each position
-                # This is converted to an integer to avoid partial pixel
-                # translations in other steps
-                offsetx = rng.uniform(-1, 1) \
-                    * (self.image.array.shape[shortax] * tol)
-                offsety = rng.uniform(-1, 1) \
-                    * (self.image.array.shape[longax] * longtol)
-                offsetx = int(offsetx)
-                offsety = int(offsety)
-                image_pos = galsim.PositionD(coo[0]+offsetx,
-                                             coo[1]+offsety)
-                world_pos = self.image.wcs.toWorld(image_pos)
-                ra_cens.append(world_pos.ra.deg)
-                dec_cens.append(world_pos.dec.deg)
-                i += 1
-                if i > n-1:
-                    break
+        # Select one of the 9 possible points at random, via a uniform dist.
+        ix = rng.integers(0, 8)
+        iy = rng.integers(0, 8)
+        # Maximum tol% random offset in x and y from each position
+        # This is converted to an integer to avoid partial pixel
+        # translations in other steps
+        offsetx = rng.uniform(-1, 1) \
+            * (self.image.array.shape[shortax] * tol)
+        offsety = rng.uniform(-1, 1) \
+            * (self.image.array.shape[longax] * longtol)
+        offsetx = int(offsetx)
+        offsety = int(offsety)
+        image_pos = galsim.PositionD(gridx[ix]+offsetx,
+                                     gridy[iy]+offsety)
+        world_pos = self.image.wcs.toWorld(image_pos)
+        ra_cen = world_pos.ra.deg
+        dec_cen = world_pos.dec.deg
 
-        centers = list(zip(ra_cens, dec_cens))
-        return centers
+        self.raCen = ra_cen
+        self.decCen = dec_cen
+        # Rederiving the WCS and making a new image
+        # I'm sure there's a more elegant way to do this.
+        self.createWcs(self.pxScale)
+        self.makeImage(self.noise)
+        self.header = self.w.to_header()
+        self.offsets = (gridx[ix]+offsetx-cenx, gridy[iy]+offsety-ceny)
+        # Adding these to the header for later retrieval
+        self.header['offsetx'] = self.offsets[0]
+        self.header['offsety'] = self.offsets[1]
 
     def makeImage(self, noise=None):
         '''
@@ -414,9 +435,6 @@ class DrawModels():
         While this can be broadened via convolution, it cannot easily be
         narrowed.  E.G., the Montes et al. (2021) HSC PSF model has
         FWHM = 1.07".
-
-        ALSO: at the moment, partial pixel shift is not in place, so image
-        coaddition will not work quite right.
         '''
         psf = fits.getdata(psfPath)
         flux = 10**(-0.4*(mag - magZp))
@@ -717,7 +735,7 @@ def makeSersicStamp(n, rEff, axRat, pa, mag, beta, fwhm, stampName,
         sersic = galsim.Convolve([sersic, psf])
     else:
         print('0 FWHM supplied; skipping convolution....')
-    stampWidth = 2*srsc.sbLimWidth(mag, n, rEff, axRat, muLim)
+    stampWidth = 2*srsc.sbLimWidth(mag, rEff, n, axRat, muLim)
     stampWidth = int(np.round(stampWidth/pxScale, 0))
     bounds = galsim.BoundsI(1, stampWidth, 1, stampWidth)
 
