@@ -146,8 +146,8 @@ class ImageBuilder():
                                                      np.abs(self.polyDict[key])
                                                      * fracDisplacement)
                     # Flip a coin to swap orientation on some cross terms
-                    # if key[1] != key[3]:
-                    if (key[1] != '0') & (key[3] != '0'):
+                    if key[1] != key[3]:
+                    # if (key[1] != '0') & (key[3] != '0'):
                         coin = rng.integers(0, 2)
                         if coin:
                             self.polyDict[key] = -self.polyDict[key]
