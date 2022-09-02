@@ -7,6 +7,8 @@ measureMetrics : software for doing photometry on images and outputting metrics 
 
 syntheticImages : software for creating mock images, with model galaxies, stars, and noise.  Used for testing sky-subtraction algorithm against ground-truth.
 
+RealDataTests.pdf : compiled Jupyter Notebook containing a description of our proposed novel sky-subtraction method, with examples, as well as qualitative and quantitative tests of this method done on real imaging data from two telescopes.
+
 
 ### License
 ***
