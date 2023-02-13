@@ -9,11 +9,8 @@ insert_fakes.py, including sky-subtraction and image coaddition.
 import numpy as np
 from scipy import ndimage
 from scipy.stats import sigmaclip
-from scipy import fftpack
-from skimage.restoration import denoise_wavelet
 from astropy.io import fits
 from astropy.modeling.models import Legendre2D
-from astropy.modeling.models import Chebyshev2D
 from astropy.modeling.fitting import LevMarLSQFitter
 from skimage.restoration import inpaint
 import cv2
@@ -145,6 +142,8 @@ def binImage(maskedHdu, block=9):
         -------
         binnedHdu : `astropy.io.fits.hdu.image.PrimaryHDU`
             Binned image, with scaled WCS if applicable
+        weight: `numpy.ndarray`
+            Weight map, proportional to number of unmasked pixels in each bin
     NOTE: this doesn't allow for higher-order terms like PC3_J, PC4_J, etc.
     '''
     assert block > 0, 'Binning factor must be positive and non-zero'
@@ -180,20 +179,17 @@ def binImage(maskedHdu, block=9):
                          block)
                         )
 
-    # Have to keep bins with very few masked pixels from skewing the results
     binned = np.zeros((im_shape[0]//block, im_shape[1]//block))
+    weight = np.zeros((im_shape[0]//block, im_shape[1]//block))
     for i in range(bin_im.shape[0]):
         for j in range(bin_im.shape[2]):
             box = bin_im[i, :, j, :]
-            msk = np.isfinite(box)
-            if len(msk[msk]) <= (2*len(msk.flatten()))//3:
-                binned[i, j] = np.nan
-            else:
-                # Use clipped median/mean?
-                # binned[i, j] = np.nanmedian(box)
-                bad = np.isnan(box)
-                clip = sigmaclip(box[~bad])
-                binned[i, j] = np.mean(clip.clipped)
+
+            # Use clipped mean to mimic LSST
+            bad = ~np.isfinite(box)
+            clip = sigmaclip(box[~bad])
+            binned[i, j] = np.mean(clip.clipped)
+            weight[i, j] = len(box[~bad])/(block**2)
 
     # Transform WCS to the binned coordinate system
     bn_head = maskedHdu[0].header.copy()
@@ -211,7 +207,7 @@ def binImage(maskedHdu, block=9):
     hdu = fits.PrimaryHDU(binned, header=bn_head)
     binnedHdu = fits.HDUList([hdu])
 
-    return binnedHdu
+    return binnedHdu, weight
 
 
 def maskToLimit(imageNoSky, sbLim, magZp, pxScale=0.168):
@@ -280,37 +276,22 @@ def legendreSkySub(polyOrder, maskedImage, bnFac, maskVal=np.nan, full=False):
     fit = LevMarLSQFitter()
 
     try:
-        binnedImage = binImage(maskedImage, bnFac)
+        binnedImage, weights = binImage(maskedImage, bnFac)
     except AssertionError:
         print('maskedImage must have a valid WCS header to bin!')
         return
     bnx = np.arange(bnFac//2+1, binnedImage[0].data.shape[1]*bnFac, bnFac)
     bny = np.arange(bnFac//2+1, binnedImage[0].data.shape[0]*bnFac, bnFac)
     bnX, bnY = np.meshgrid(bnx, bny)
-    _sky = np.nanmedian(binnedImage[0].data[binnedImage[0].data != maskVal])
-    _dsky = np.nanstd(binnedImage[0].data[binnedImage[0].data != maskVal])
 
-    # Accepting only pixels within 3 standard deviations of background
-    good = (binnedImage[0].data > _sky-3*_dsky) & \
-           (binnedImage[0].data < _sky+3*_dsky)
-
-    # Fitter can't handle np.nan
+    # Fitter can't handle np.nan; these are weighted 0.000
     binnedImage[0].data[np.isnan(binnedImage[0].data)] = -999
 
-    # Rejecting outliers; 3 rounds 3 sigma rejection
-    for i in range(3):
-        m = fit(m_init, bnX, bnY, binnedImage[0].data, weights=good)
-        scatter = np.nanstd(m(bnX[good], bnY[good])
-                            - binnedImage[0].data[good])
-        diff = binnedImage[0].data - m(bnX, bnY)
-        good = good & (np.abs(diff) < (3 * scatter))
-        m_init = m
-
-    # Doing final fit and sky subtraction
+    # Fitting sky background using weight map
     x = np.arange(1, maskedImage[0].data.shape[1]+1)
     y = np.arange(1, maskedImage[0].data.shape[0]+1)
     X, Y = np.meshgrid(x, y)
-    m = fit(m_init, bnX, bnY, binnedImage[0].data, weights=good)
+    m = fit(m_init, bnX, bnY, binnedImage[0].data, weights=weights)
     skyModel = m(X, Y)
 
     if full:
@@ -701,6 +682,7 @@ def makeSkyMapBinning(skyImage, binnedHdu, sigma=1.0, block=16):
 
 def finalProcessing(imListFull, imListModels, coaddHdu,
                     lowerBound, upperBound, block,
+                    polyOrder,
                     sbLim=25, magZp=31.4, pxScale=0.168):
     '''
     Once initial coadd is created, generate new-generation sky-subtracted
@@ -722,6 +704,8 @@ def finalProcessing(imListFull, imListModels, coaddHdu,
             Based on coadd, not imageHdu.
         block : `int`
             Bin factor to use when processing noisy sky frames
+        polyOrder : `int`
+            Order of polynomial used to fit sky map
         sbLim : `float`
             Limit for shallow masks, in units of surface brightness
         magZp : `float`
@@ -751,8 +735,10 @@ def finalProcessing(imListFull, imListModels, coaddHdu,
         skyMapNoisy[0].data[mask[0].data == 1] = np.nan
 
         # Process to remove artifacts and push down noise
-        binSky = binImage(skyMapNoisy, block)
-        skyMap = makeSkyMapBinning(skyMapNoisy, binSky, 1.0, block)
+        # binSky = binImage(skyMapNoisy, block)
+        # skyMap = makeSkyMapBinning(skyMapNoisy, binSky, 1.0, block)
+        # Alternative: fit a model to the coadd-subtracted images
+        skyMap = legendreSkySub(polyOrder, skyMapNoisy, block)
 
         newIm = makeHduList(im[0].data - skyMap, im[0].header)
 

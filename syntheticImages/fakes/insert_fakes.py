@@ -374,7 +374,7 @@ class DrawModels():
 
         return image_pos, image_posi, offset
 
-    def drawPsf(self, beta, fwhm, mag, magZp=27.0):
+    def drawPsf(self, beta, fwhm, mag, magZp=27.0, method='auto'):
         '''
         Draws a model star at the given coordinates with the given parameters
         onto the given image.
@@ -398,10 +398,12 @@ class DrawModels():
         psf = galsim.Moffat(beta=beta, fwhm=fwhm, flux=flux)
 
         self.image_pos, self.image_posi, self.offset = self.convertCoords()
+        bounds = galsim.BoundsI(1, 102, 1, 102)  # Changing default bounds
 
         try:
             stamp = psf.drawImage(wcs=self.image.wcs.local(self.image_pos),
-                                  offset=self.offset)
+                                  offset=self.offset, bounds=bounds,
+                                  method=method)  # Avoiding ringing
             # Must be an integer, so the initial offset is required
             stamp.setCenter(self.image_posi.x, self.image_posi.y)
             bounds = stamp.bounds & self.image.bounds
