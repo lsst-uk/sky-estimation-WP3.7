@@ -12,6 +12,8 @@ from scipy.stats import sigmaclip
 from astropy.io import fits
 from astropy.modeling.models import Legendre2D
 from astropy.modeling.fitting import LevMarLSQFitter
+from astropy.stats import mad_std
+import ccdproc
 from skimage.restoration import inpaint
 import cv2
 import glob
@@ -149,9 +151,14 @@ def binImage(maskedHdu, block=9):
     assert block > 0, 'Binning factor must be positive and non-zero'
     assert maskedHdu[0].header['NAXIS1'] == maskedHdu[0].data.shape[1], \
         'Header mismatch or non-existent.  Image needs a header.'
-    assert ('PC1_1' in maskedHdu[0].header) \
-        | ('CD1_1' in maskedHdu[0].header), \
-        'WCS info in header must be in either PCI_J or CDI_J format.'
+    # Checking for a header with WCS info
+    if ('PC1_1' not in maskedHdu[0].header) \
+       | ('CD1_1' not in maskedHdu[0].header):
+        print("NOTE: WCS info not found.")
+        print("WCS info in header must be in either PCI_J or CDI_J format.")
+        wcs_flag = 0
+    else:
+        wcs_flag = 1
 
     # First converting header to CDI_J format if not already there
     keys = ['PC1_1', 'PC1_2', 'PC2_1', 'PC2_2']
@@ -191,18 +198,19 @@ def binImage(maskedHdu, block=9):
             binned[i, j] = np.mean(clip.clipped)
             weight[i, j] = len(box[~bad])/(block**2)
 
-    # Transform WCS to the binned coordinate system
     bn_head = maskedHdu[0].header.copy()
-    bn_head['CRPIX1'] = bn_head['CRPIX1']/block
-    bn_head['CRPIX2'] = bn_head['CRPIX2']/block
-    if 'CD1_1' in bn_head:
-        bn_head['CD1_1'] = bn_head['CD1_1']*block
-    if 'CD2_2' in bn_head:
-        bn_head['CD2_2'] = bn_head['CD2_2']*block
-    if 'CD1_2' in bn_head:
-        bn_head['CD1_2'] = bn_head['CD1_2']*block
-    if 'CD2_1' in bn_head:
-        bn_head['CD2_1'] = bn_head['CD2_1']*block
+    # Transform WCS to the binned coordinate system if present
+    if wcs_flag:
+        bn_head['CRPIX1'] = bn_head['CRPIX1']/block
+        bn_head['CRPIX2'] = bn_head['CRPIX2']/block
+        if 'CD1_1' in bn_head:
+            bn_head['CD1_1'] = bn_head['CD1_1']*block
+        if 'CD2_2' in bn_head:
+            bn_head['CD2_2'] = bn_head['CD2_2']*block
+        if 'CD1_2' in bn_head:
+            bn_head['CD1_2'] = bn_head['CD1_2']*block
+        if 'CD2_1' in bn_head:
+            bn_head['CD2_1'] = bn_head['CD2_1']*block
 
     hdu = fits.PrimaryHDU(binned, header=bn_head)
     binnedHdu = fits.HDUList([hdu])
@@ -327,7 +335,8 @@ def initialProcessing(imListFull, imListModels, maskMu,
         ------
         im : `astropy.io.fits.hdu.image.PrimaryHDU`
             Sky-subtracted image
-
+        m : `astropy.modeling.polynomial.Legendre2D`
+                Best-fit sky model parameters
     '''
     for i in range(len(imListFull)):
         print('Doing image ', i+1, ' of ', len(imListFull))
@@ -336,14 +345,18 @@ def initialProcessing(imListFull, imListModels, maskMu,
         models = fits.open(imListModels[i])
         mask = maskToLimit(models, maskMu, magZp)
         maskIm[0].data[mask[0].data == 1] = np.nan
-        skyModel = legendreSkySub(polyOrder, maskIm, bnFac, maskVal)
+        skyModel, m = legendreSkySub(polyOrder,
+                                     maskIm,
+                                     bnFac,
+                                     maskVal,
+                                     full=True)
         im[0].data -= skyModel
 
-        yield im
+        yield im, m
 
 
 def coaddImages(raCen, decCen, size, im, pxScale=0.168,
-                prefix='', outputDir='.', writeIms=False, expMap=False):
+                prefix='', outputDir='.', expMap=False):
     '''
     Registers and median coadds all images using a blank reference image
         Parameters
@@ -353,7 +366,7 @@ def coaddImages(raCen, decCen, size, im, pxScale=0.168,
         decCen : `float`
             Central pixel reference declination, in decimal degrees
         size : `int`
-            Width of blank image in pixels
+            Width of reference image in pixels
         im : `generator`
             Generator produce by either initialProcessing() or
             finalProcessing()
@@ -363,11 +376,8 @@ def coaddImages(raCen, decCen, size, im, pxScale=0.168,
         prefix : `string`
             Image prefix appended to registered images if writeIms == True
         outputDir : `string`
-            Path to directory in which to write registered image files if
-            writeIms == True
-        writeIms : `bool`
-            If True, will write registered images to the disk in addition to
-            the coadded image itself
+            Path to directory in which to write registered image files for
+            eventual coaddition
         expMap : `bool`
             If True, will write out an image showing the number of exposures
             per pixel in the final coadd
@@ -376,15 +386,25 @@ def coaddImages(raCen, decCen, size, im, pxScale=0.168,
         -------
         coaddHdu : `astropy.io.fits.hdu.image.PrimaryHDU`
             Images coadded onto the reference blankImage, with header
+        skyMods : `list`
+            List of best-fit polynomial sky models
+        exposureMap : `numpy.ndarray`
+            If expMap=True, an image of same dimensions as coaddHdu, with
+            integer values per pixel for number of contributing exposures
     '''
     assert type(prefix) == str
     assert type(outputDir) == str
 
     blankImage = makeBlankImage(raCen, decCen, size, pxScale)
 
-    allIms = []
-    # Doing full processing as part of the coaddition procedure
-    for i, image in enumerate(im):
+    # Using CCDPROC package requires writing to the disk
+    ref_images = []
+    skyMods = []
+    if expMap:
+        exposureMap = np.zeros(blankImage[0].data.shape)
+    for i, model in enumerate(im):
+        image = model[0]
+        m = model[1]
         assert (image[0].data.shape[1] < size) \
             & (image[0].data.shape[0] < size), \
             'Coadd size must be larger than image size!'
@@ -418,31 +438,41 @@ def coaddImages(raCen, decCen, size, im, pxScale=0.168,
             top_edge = size
 
         proj_im[bottom_edge: top_edge, left_edge: right_edge] = image[0].data
+
+        # Writes images to the disk at location outputDir
+        writeImHead(proj_im, blankImage[0].header,
+                    outputDir+'/'+prefix+'fakes'+str(i)+'.fits')
+
+        ref_images.append(outputDir+'/'+prefix+'fakes'+str(i)+'.fits')
+        skyMods.append(m)
+
+        del proj_im
+        del model
         del image
 
-        # Yes, this runs into memory issues if you use too many images or too
-        # large a coadd size.
-        allIms.append(proj_im)
-        if writeIms:
-            writeImHead(proj_im, blankImage[0].header,
-                        outputDir+'/'+prefix+'fakes'+str(i)+'.fits')
-        del proj_im
+        if expMap:
+            exposureMap[bottom_edge: top_edge, left_edge: right_edge] += 1
 
     print('Now median combining...')
-    coadd = np.nanmedian(allIms, axis=0, overwrite_input=True)
+    coadd = ccdproc.combine(ref_images,
+                            method="median",
+                            sigma_clip=True,
+                            sigma_clip_low_thresh=5,
+                            sigma_clip_high_thresh=5,
+                            sigma_clip_func=np.ma.median,
+                            sigma_clip_dev_func=mad_std,
+                            mem_limit=350e6,
+                            unit="adu",
+                            )
+
     hdu = fits.PrimaryHDU(coadd, header=blankImage[0].header)
     coaddHdu = fits.HDUList([hdu])
 
     if expMap:
-        for im in allIms:
-            im[np.isfinite(im)] = 1
-        numObs = np.nansum(allIms, axis=0)
-        numObs = makeHduList(numObs, header=coaddHdu[0].header)
-
-        return coaddHdu, numObs
+        return coaddHdu, skyMods, exposureMap
 
     else:
-        return coaddHdu
+        return coaddHdu, skyMods
 
 
 def alignCropCoadd(image, coadd):
@@ -683,7 +713,8 @@ def makeSkyMapBinning(skyImage, binnedHdu, sigma=1.0, block=16):
 def finalProcessing(imListFull, imListModels, coaddHdu,
                     lowerBound, upperBound, block,
                     polyOrder,
-                    sbLim=25, magZp=31.4, pxScale=0.168):
+                    sbLim=25, magZp=31.4, pxScale=0.168,
+                    polyFitFlag=True):
     '''
     Once initial coadd is created, generate new-generation sky-subtracted
     images with this.  Then use the generator this returns to remake the
@@ -712,11 +743,19 @@ def finalProcessing(imListFull, imListModels, coaddHdu,
             Zeropoint to convert from surface brightness to counts
         pxScale : `float`
             Pixel scale in units of arcsec/px
+        polyFitFlag : `bool`
+            If true, fits a polynomial to the difference image.  If not, bins
+            and smoothes the difference image to generate sky estimate.
 
         Yields
         ------
         newIm : `astropy.io.fits.hdu.image.PrimaryHDU`
             Image with revised coadd-subtraction sky removed
+        m : `astropy.modeling.polynomial.Legendre2D`
+            Best-fit sky model parameters (if polySkyFlag=True)
+        or
+        skyMap : `numpy.ndarray`
+            Binned and smoothed sky model (if polySkyFlag=False)
     '''
     for i in range(len(imListFull)):
         print('Doing image ', i+1, ' of ', len(imListFull))
@@ -734,12 +773,24 @@ def finalProcessing(imListFull, imListModels, coaddHdu,
         mask = maskToLimit(fits.open(imListModels[i]), sbLim, magZp, pxScale)
         skyMapNoisy[0].data[mask[0].data == 1] = np.nan
 
+        # Fit a model to the coadd-subtracted images
+        if polyFitFlag:
+            print("Doing polynomial fits...")
+            skyMap, m = legendreSkySub(polyOrder,
+                                       skyMapNoisy,
+                                       block,
+                                       full=True)
+
         # Process to remove artifacts and push down noise
-        # binSky = binImage(skyMapNoisy, block)
-        # skyMap = makeSkyMapBinning(skyMapNoisy, binSky, 1.0, block)
-        # Alternative: fit a model to the coadd-subtracted images
-        skyMap = legendreSkySub(polyOrder, skyMapNoisy, block)
+        else:
+            print("Doing binning and smoothing...")
+            binSky = binImage(skyMapNoisy, block)
+            skyMap = makeSkyMapBinning(skyMapNoisy, binSky, 1.0, block)
 
         newIm = makeHduList(im[0].data - skyMap, im[0].header)
 
-        yield newIm
+        if polyFitFlag:
+            yield newIm, m
+
+        else:
+            yield newIm, skyMap
