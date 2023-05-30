@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 '''
-Software to generate fake images with model stars and galaxies as well as
-noisy model skies.
+Software to generate synthetic images with model stars and galaxies as well as
+noisy model skies.  Uses GalSim and Astropy as the base software.
 '''
 import math
 import copy
@@ -31,21 +31,45 @@ class ImageBuilder():
         Initializes baseline image
             Parameters
             ----------
-            dimX : `int'
+            dimX : int
                 Image size along x-axis
-            dimY : `int'
+            dimY : int
                 Image size along y-axis
-            raCen : `float'
+            raCen : float
                 Reference RA, in decimal degrees
-            decCen : `float'
+            decCen : float
                 Reference DEC, in decimal degrees
-            pxScale : `float'
+            pxScale : float
                 Pixel scale in arcsec/pixel
-            polyDict : `dict`
+            polyDict : dict
                 Dictionary containing sky polynomial coefficients
                 Keys are designated 'cN_M' where N and M are integers
-            noise : `galsim.noise'
+            noise : galsim.noise
                 If noise is needed, can add it to the image with this
+
+            Generated attributes
+            --------------------
+            self.dimX : int
+                Image size along x-axis
+            self.dimY : int
+                Image size along y-axis
+            self.raCen : float
+                Reference RA, in decimal degrees
+            self.decCen : float
+                Reference DEC, in decimal degrees
+            self.pxScale : float
+                Pixel scale in arcsec/pixel
+            self.noise : galsim.noise
+                If noise is needed, can add it to the image with this
+            self.w : astropy.wcs.WCS
+                Astropy WCS object with desired parameters
+            self.image : galsim.Image
+                Blank Galsim image with WCS
+            self.polyDict : dict
+                Dictionary containing sky polynomial coefficients
+                Keys are designated 'cN_M' where N and M are integers
+            self.header : fits.header.Header
+                Image header object
         '''
         assert (dimX > 0) & (type(dimX) == int), \
             "dimX must be a positive integer."
@@ -79,12 +103,12 @@ class ImageBuilder():
         and pixel scale
             Parameters
             ----------
-            pxScale : `float'
+            pxScale : float
                 Pixel scale in arcsec/pixel
 
-            Returns
-            -------
-            self.w : `astropy.wcs.WCS'
+            Generated attributes
+            --------------------
+            self.w : astropy.wcs.WCS
                 Astropy WCS object with desired parameters
         NOTE: no distortions, no rotation from standard projection
         '''
@@ -111,21 +135,21 @@ class ImageBuilder():
         Generates sky polynomial coefficients, up to order 2
             Parameters
             ----------
-            fracDisplacement : `float`
+            fracDisplacement : float
                 Fraction of initial coefficient value to use in generating
-                random offsets.  E.G., if mean is 2000, a value of 0.05 will
+                random offsets.  E.g., if mean is 2000, a value of 0.05 will
                 adjust this to 2000 + N(0, 2000*0.05)
-            random : `bool`
+            random : bool
                 Chooses whether to add random displacements to coefficients
-            seed : `int`
+            seed : int
                 For the random number generator.  Used mainly for testing
                 purposes.
 
-            Returns
-            -------
-            None; updates Class polyDict attribute to include all potential
-            terms, up to c2_2
-
+            Generated attributes
+            --------------------
+            self.polyDict: dict
+                Updates Class polyDict attribute to include all potential
+                terms, up to c2_2
         '''
         assert fracDisplacement >= 0, \
             "Displacement must be a positive number or zero"
@@ -147,7 +171,6 @@ class ImageBuilder():
                                                      * fracDisplacement)
                     # Flip a coin to swap orientation on some cross terms
                     if key[1] != key[3]:
-                    # if (key[1] != '0') & (key[3] != '0'):
                         coin = rng.integers(0, 2)
                         if coin:
                             self.polyDict[key] = -self.polyDict[key]
@@ -163,24 +186,29 @@ class ImageBuilder():
         images
             Parameters
             ----------
-            polyDeg : `int`
+            polyDeg : int
                 Degree of the sky polynomial (0, 1, or 2)
-            fracDisplacement : `float`
+            fracDisplacement : float
                 Fraction of initial coefficient value to use in generating
                 random offsets.  E.G., if mean is 2000, a value of 0.05 will
                 adjust this to 2000 + N(0, 2000*0.05)
-            random : `bool`
+            random : bool
                 Chooses whether to add random displacements to coefficients
-            seed : `int`
+            seed : int
                 For the random number generator.  Used mainly for testing
                 purposes.
 
-            Returns
-            -------
-            self.sky : `numpy.array'
+            Generated attributes
+            --------------------
+            self.polyDict: dict
+                Updates Class polyDict attribute to include all potential
+                terms, up to c2_2
+            self.sky : numpy.array
                 Image of polynomial sky pattern
-            self.poisson : `numpy.array`
+            self.poisson : numpy.array
                 Image of Poisson noise only, for testing purposes
+            self.header : fits.header.Header
+                Image header object
         '''
         assert (polyDeg == 0) | (polyDeg == 1) | (polyDeg == 2),\
             "Polynomial order must be 0, 1, or 2"
@@ -228,26 +256,37 @@ class ImageBuilder():
         for key in self.polyDict:
             self.header[key] = self.polyDict[key]
 
-    def ditheredCoordinates(self, ditherStep=100, tol=0.1):
+    def ditheredCoordinates(self, ditherStep=100, tol=0.1, seed=None):
         '''
         Calculates the centers of semi-randomly dithered exposures centered at
         (self.raCen, self.decCen), using a 9-point dither pattern as a baseline
             Parameters
             ----------
-            ditherStep : `int`
+            ditherStep : int
                 Size of dither, in pixels
-            tol : `float'
-                Maximum amplitude in random offsets to dither points
+            tol : float
+                Maximum amplitude in random offsets to dither points.
                 Based on the image axis lengths, not ditherStep.
+            seed : int
+                For the random number generator.  Used mainly for testing
+                purposes.
 
-            Returns
-            -------
-            self.offset : `tuple`
-                Offsets in x,y, for easier coaddition.
-
-            Updates self.raCen, self.decCen with new coordinates
+            Generated attributes
+            --------------------
+            self.offset : tuple
+                Offsets in x,y, for easier coaddition
+            self.raCen : float
+                Updated from initial value for new coordinates
+            self.decCen : float
+                Updated from initial value for new coordinates
+            self.w : astropy.wcs.WCS
+                Updates WCS attribute
+            self.image : galsim.Image
+                Updates image with new header
+            self.header : fits.header.Header
+                Updates header with new coordinates
         '''
-        rng = np.random.default_rng()
+        rng = np.random.default_rng(seed)
         longax = np.argmax(self.image.array.shape)
         shortax = np.argmin(self.image.array.shape)
         axfrac = self.image.array.shape[shortax] \
@@ -298,15 +337,18 @@ class ImageBuilder():
         Creates blank image of the given dimensions with the provided WCS
             Parameters
             ----------
-            w : `astropy.wcs.WCS'
+            w : astropy.wcs.WCS
                 WCS object containing astrometric solution desired for output
-                image (becomes attribute of image)
-            noise : `galsim.noise'
+                image
+            noise : galsim.noise
                 If noise is needed, can add it to the image with this
 
-            Returns
-            -------
-            self.image : `galsim.Image'
+            Generated attributes
+            --------------------
+            self.w : astropy.wcs.WCS
+                WCS object containing astrometric solution desired for output
+                image
+            self.image : galsim.Image
                 Blank Galsim image with WCS
         '''
         w = galsim.AstropyWCS(wcs=self.w)
@@ -319,7 +361,7 @@ class ImageBuilder():
 class DrawModels():
     '''
     Class for populating images with models.
-    Needs a coordinates for the models and an image on which to draw them
+    Needs a coordinate for the model and an image on which to draw them
     (created with ImageBuilder())
     '''
 
@@ -328,11 +370,20 @@ class DrawModels():
         Initializes model coordinates
             Parameters
             ----------
-            self.ra : `float'
+            ra : float
                 Right ascension coordinate, in decimal degrees
-            self.dec : `float'
+            dec : float
                 Declination coordinate, in decimal degrees
-            self.image : `galsim.Image'
+            image : galsim.Image
+                Galsim image object on which to draw the models
+
+            Generated attributes
+            --------------------
+            self.ra : float
+                Right ascension coordinate, in decimal degrees
+            self.dec : float
+                Declination coordinate, in decimal degrees
+            self.image : galsim.Image
                 Galsim image object on which to draw the models
         '''
         assert (ra >= 0) & (ra <= 360), \
@@ -340,7 +391,7 @@ class DrawModels():
         assert (dec >= -90) & (dec <= 90), \
             "Invalid Dec: use decimal degrees."
         assert (type(image) == galsim.image.Image), \
-            "image must be galsim.image.Image class."
+            "Image must be galsim.image.Image class."
         self.ra = ra
         self.dec = dec
         self.image = image
@@ -351,11 +402,11 @@ class DrawModels():
         shifts in galsim.Image object with WCS
             Returns
             -------
-            image_pos : `galsim.PositionD'
+            image_pos : galsim.PositionD
                 Pixel coordinates of (ra,dec) in input image array
-            image_posi : `galsim.PositionI'
+            image_posi : galsim.PositionI
                 Integer floor coordinates of stamp center pixel
-            offset : `galsim.PositionD'
+            offset : galsim.PositionD
                 Fractional pixel offset for alignment to pixel center
         '''
         ra = self.ra * galsim.degrees
@@ -374,36 +425,40 @@ class DrawModels():
 
         return image_pos, image_posi, offset
 
-    def drawPsf(self, beta, fwhm, mag, magZp=27.0, method='auto'):
+    def drawPsf(self, beta, fwhm, mag, method='auto', magZp=33.1):
         '''
         Draws a model star at the given coordinates with the given parameters
-        onto the given image.
+        onto the given image.  Uses a Moffat profile.
             Parameters
             ----------
-            beta : `float'
+            beta : float
                 Moffat beta value
-            fwhm : `float'
-                PSF full-width at half-maximum
-            mag : `float'
+            fwhm : float
+                PSF full-width at half-maximum in arcseconds
+            mag : float
                 Star magnitude, to be converted into counts
-            magZp : `float'
+            method : string
+                Convolution method for galsim.DrawImage
+                Use "real_space" to avoid FFT ringing, for example
+            magZp : float
                 Magnitude zeropoint, to convert from mag to counts
 
-            Returns
-            -------
-            Nothing--draws PSF model onto image at specified coordinate
+            Notes
+            -----
+            Draws PSF model onto image at specified coordinate.
             If coordinate is not on the image, it passes
         '''
         flux = 10**(-0.4*(mag - magZp))
         psf = galsim.Moffat(beta=beta, fwhm=fwhm, flux=flux)
 
         self.image_pos, self.image_posi, self.offset = self.convertCoords()
-        bounds = galsim.BoundsI(1, 102, 1, 102)  # Changing default bounds
+        # Changing default bounds to ensure bright stars don't show edges
+        bounds = galsim.BoundsI(1, 102, 1, 102)
 
         try:
             stamp = psf.drawImage(wcs=self.image.wcs.local(self.image_pos),
                                   offset=self.offset, bounds=bounds,
-                                  method=method)  # Avoiding ringing
+                                  method=method)
             # Must be an integer, so the initial offset is required
             stamp.setCenter(self.image_posi.x, self.image_posi.y)
             bounds = stamp.bounds & self.image.bounds
@@ -412,43 +467,37 @@ class DrawModels():
         except galsim.errors.GalSimBoundsError:
             pass
 
-    def drawFullPsf(self, mag, psfPath, dimX=4096, dimY=2048, magZp=27.0):
+    def drawPoint(self, mag, dimX=4096, dimY=4096, magZp=33.1, pxScale=0.2):
         '''
-        Uses a larger PSF model FITS image to create star models with wings
-        PSF model must be normalized, such that sum(flux) == 1
+        Creates a single pixel with total star flux at a given coordinate.
+        Used generally for application of custom convolution kernels.
             Parameters
             ----------
-            mag : `float`
-                Model star magnitude
-            psfPath : `string`
-                Full path to normalized full PSF model, including filename
-            dimX : `int`
+            mag : float
+                Star magnitude, to be converted into counts
+            dimX : int
                 Image dimension in x-coordinate (px)
-            dimY : `int`
+            dimY : int
                 Image dimension in y-coordinate (px)
-            magZp : TYPE, optional
-                Magnitude to flux zeropoint. The default is 27.0.
+            magZp : float
+                Magnitude zeropoint, to convert from mag to counts
+            pxScale : float
+                Pixel scale in arcsec/pixel
 
-            Returns
-            -------
-            Nothing--adds the PSF image to the input image at the appropriate
-            coordinates
-        NOTE: the PSF FWHM is fixed to that of the model image you feed this.
-        While this can be broadened via convolution, it cannot easily be
-        narrowed.  E.G., the Montes et al. (2021) HSC PSF model has
-        FWHM = 1.07".
+            Notes
+            -----
+            Draws star as single pixel with full counts at the specified
+            coordinate.  Interpolates to partial pixel coordinates.
+            If coordinate is not on the image, it passes
         '''
-        psf = fits.getdata(psfPath)
         flux = 10**(-0.4*(mag - magZp))
-        psf *= flux  # Scaling to proper magnitude
+        psf = galsim.DeltaFunction(flux=flux)
+
         self.image_pos, self.image_posi, self.offset = self.convertCoords()
-        bad = (self.image_pos.x > dimX) | (self.image_pos.x < 0) \
-            | (self.image_pos.y > dimY) | (self.image_pos.y < 0)
-        if bad:
-            return  # Skips stars that are out of the frame
+
         try:
-            psf = galsim.Image(psf, wcs=self.image.wcs.local(self.image_pos))
-            stamp = psf
+            stamp = psf.drawImage(wcs=self.image.wcs.local(self.image_pos),
+                                  offset=self.offset)
             # Must be an integer, so the initial offset is required
             stamp.setCenter(self.image_posi.x, self.image_posi.y)
             bounds = stamp.bounds & self.image.bounds
@@ -458,43 +507,45 @@ class DrawModels():
             pass
 
     def drawSersic(self, n, rEff, axRat, pa, mag, beta, fwhm, stampWidth,
-                   magZp=27.0):
+                   magZp=33.1):
         '''
         Draws a model Sersic profile at the given coordinates with the given
-        parameters onto the given image.
+        parameters onto the given image.  Convolves with a Moffat profile, or
+        no kernel if FWHM=0.
             Parameters
             ----------
-            n : `float`
-                Sersic index (useful range is 0.3 -- 6.2)
-            rEff : `float'
+            n : float
+                Sersic index (valid range is 0.3 -- 6.2)
+            rEff : float
                 Half-light radius, in pixels
-            axRat : `float`
+            axRat : float
                 Projected axis ratio (values between 0 and 1)
-            pa : `float`
+            pa : float
                 Position angle in degrees
-            mag : `float'
+            mag : float
                 Object magnitude, to be converted into counts
-            beta : `float`
-                PSF beta value for convolution
-            fwhm : `float`
+            beta : float
+                PSF beta value for Moffat kernel convolution
+            fwhm : float
                 PSF FWHM for convolution; if 0, skips convolution
-            stampWidth : `int`
+            stampWidth : int
                 Width of the model bounding box, in pixels
-            magZp : `float`
+            magZp : float
                 Magnitude zeropoint, to convert from mag to counts
 
-            Returns
-            -------
-            Nothing--draws Sersic model onto image at specified coordinate
-            If coordinate is not on the image, it passes
-        NOTE: useful for drawing small objects, but for large ones use
-        makeSersicStamp() function.  Takes a long while to draw the stamp.
+            Notes
+            -----
+            Draws Sersic model onto image at specified coordinate.
+            If coordinate is not on the image, it passes.
+
+            Useful for drawing small objects, but for large ones use
+            makeSersicStamp() function.
         '''
         assert (n >= 0.3) & (n <= 6.2),\
             "Sersic index must be between 0.3 and  6.2"
-        assert rEff > 0, "Effective radius must be positive and non-zero!"
+        assert rEff > 0, "Effective radius must be positive and non-zero"
         assert (axRat >= 0) & (axRat <= 1.0),\
-            "Axial ratio (b/a) must be between 0 and 1!"
+            "Axial ratio (b/a) must be between 0 and 1"
         assert (pa >= -360) & (pa <= 360),\
             "Position angle must be in degrees.  Acceptable is -360 to 360"
         assert (beta > 0), "Beta must be positive"
@@ -503,7 +554,7 @@ class DrawModels():
         flux = 10**(-0.4*(mag - magZp))
         incl = np.arccos(axRat)
         incl = galsim.Angle(incl, unit=galsim.radians)
-        sersic = galsim.InclinedSersic(n, incl, rEff)
+        sersic = galsim.InclinedSersic(n, incl, rEff)  # Preserves SB
         sersic = sersic.withFlux(flux)
         sersic = sersic.rotate(galsim.Angle(pa, unit=galsim.degrees))
         bounds = galsim.BoundsI(1, stampWidth, 1, stampWidth)
@@ -532,22 +583,23 @@ class DrawModels():
             pass
 
 
+# Some convenience function follow for building source catalogues.
 def get2MASSCatalogue(raCen, decCen, width):
     '''
     Downloads a star catalogue from 2MASS, to be used to generate
     fake stars for a particular field
         Parameters
         ----------
-        raCen : `float'
+        raCen : float
             Right ascension coordinate of search box center, in decimal degrees
-        decCen : `float'
+        decCen : float
             Declination coordinate of search box center, in decimal degrees
-        width : `float'
+        width : float
             Width of search box, in decimal degrees
 
         Returns
         -------
-        cat : `astropy.table.Table'
+        cat : astropy.table.Table
             Table with astroquery results for the search
     '''
     assert width > 0, 'Search box width must be positive and non-zero'
@@ -567,23 +619,28 @@ def get2MASSCatalogue(raCen, decCen, width):
 
 def getSDSSCatalogue(raCen, decCen, radius):
     '''
-    As get2MASSCatalogue, but using SDSS
+    Downloads a star catalogue from SDSS, to be used to generate fake stars for
+    a particular field
         Parameters
         ----------
-        raCen : `float'
+        raCen : float
             Right ascension coordinate of search box center, in decimal degrees
-        decCen : `float'
+        decCen : float
             Declination coordinate of search box center, in decimal degrees
-        radius : `float'
+        radius : float
             Search radius, in decimal degrees
 
         Returns
         -------
-        cat : `astropy.table.Table'
+        cat : astropy.table.Table
             Table with astroquery results for the search
-    Currently defaults to only returning coordinates and g, r, i magnitudes.
-    Returns psfMags, which are in nanomaggies.  Need to offset by 22.5 to get
-    back to ~AB magnitudes.
+
+        Notes
+        -----
+        Currently defaults to only returning coordinates and g, r, i
+        magnitudes.
+        Returns psfMags, which are in nanomaggies.  Need to offset by 22.5 to
+        get back to ~AB magnitudes.
     '''
     assert radius > 0, 'Search radius must be positive and non-zero'
     assert (raCen >= 0) & (raCen <= 360), \
@@ -598,26 +655,31 @@ def getSDSSCatalogue(raCen, decCen, radius):
     return cat
 
 
-def getGamaCatalogue(raCen, decCen, width):
+def getGamaCatalogue(raCen, decCen, width, band):
     '''
     Downloads an object catalogue from GAMA, centered at a particular
     coordinate
         Parameters
         ----------
-        raCen : `float`
+        raCen : float
             Right ascension coordinate of search box center, in decimal degrees
-        decCen : `float`
+        decCen : float
             Declination coordinate of search box center, in decimal degrees
-        width : `float`
+        width : float
             Width of search box, in decimal degrees
+        band : str
+            Name of desired photometric band (e.g., g, r, i...)
 
         Returns
         -------
-        cat : `astropy.table.Table`
+        cat : astropy.table.Table
             Table with astroquery results for the search
-    NOTE: limited to just returning RA, Dec, and i-band photometry parameters
-    (magnitude, effective radius, Sersic index, ellipticity, PA, and central
-     surface brightness)
+
+        Notes
+        -----
+        Limited to just returning RA, Dec, and chosen-band photometry params
+        (magnitude, effective radius, Sersic index, ellipticity, PA, and
+         central surface brightness)
     '''
     assert width > 0, 'Search box width must be positive and non-zero'
     assert (raCen >= 0) & (raCen <= 360), \
@@ -628,8 +690,8 @@ def getGamaCatalogue(raCen, decCen, width):
     ra2 = str(raCen - width)
     dec1 = str(decCen + width)
     dec2 = str(decCen - width)
-    columns = 'RA, DEC, GALMAG_i, GALRE_i, GALINDEX_i, ' \
-              + 'GALELLIP_i, GALPA_i, GALMU0_i'
+    columns = 'RA, DEC, GALMAG_{band}, GALRE_{band}, GALINDEX_{band}, \
+        GALELLIP_{band}, GALPA_{band}, GALMU0_{band}'.format(band=band)
     lim_ra = 'RA < ' + ra1 + ' AND RA > ' + ra2
     lim_dec = ' AND DEC < ' + dec1 + ' AND DEC > ' + dec2
     lims = lim_ra + lim_dec
@@ -639,78 +701,39 @@ def getGamaCatalogue(raCen, decCen, width):
     return cat
 
 
-def findCentralStar(ra, dec, starCatalogue, ditherStep, bWidth, pxScale=0.168):
+def makeSersicStamp(n, rEff, axRat, pa, mag, beta, fwhm, muLim,
+                    magZp=33.1, pxScale=0.2):
     '''
-    A function for building image stacks.  Under construction.
-
+    Same as DrawModels.drawSersic(), but creates a custom stamp which can be
+    written to the hard disk.  Speeds up operations over creating new stamps
+    of large models.
         Parameters
         ----------
-        ra : `float`
-            Right ascension in decimal degrees
-        dec : `float`
-            Declination in decimal degrees
-        starCatalogue : `astropy.table.table.Table`
-            Star catalogue from one of the above functions
-        ditherStep : `int`
-            Dither step size in pixels
-        bWidth : `int`
-            Search box width in pixels
-        pxScale : `float, optional
-            Pixel scale in arcsec/px. The default is 0.168.
-
-        Returns
-        -------
-        id_ra : `int`
-            Index in starCatalogue RA for the star of choice
-        id_dec : `int`
-            Index in starCatalogue Dec for the star of choice
-    '''
-    angleStep = (ditherStep * pxScale) / 3600  # Degrees
-    angleWidth = (bWidth * pxScale) / 3600  # Degrees
-    want_ra = (starCatalogue['RAJ2000'] <= ra + angleStep - angleWidth/2) \
-        & (starCatalogue['RAJ2000'] >= ra - (angleStep - angleWidth/2))
-    want_dec = (starCatalogue['DEJ2000'] <= dec + angleStep - angleWidth/2) \
-        & (starCatalogue['DEJ2000'] >= dec - (angleStep - angleWidth/2))
-
-    id_ra = np.where(want_ra)[0]
-    id_dec = np.where(want_dec)[0]
-
-    return id_ra, id_dec
-
-
-def makeSersicStamp(n, rEff, axRat, pa, mag, beta, fwhm, stampName,
-                    muLim=32.5, magZp=31.4, pxScale=0.168):
-    '''
-    Same as DrawModels.drawSersic(), but write the stamp to the disk
-        Parameters
-        ----------
-        n : `float`
-            Sersic index (useful range is 0.5 -- 6)
-        rEff : `float'
+        n : float
+            Sersic index (valid range is 0.3 -- 6.2)
+        rEff : float
             Half-light radius, in pixels
-        axRat : `float`
+        axRat : float
             Projected axis ratio (values between 0 and 1)
-        pa : `float`
+        pa : float
             Position angle in degrees
-        mag : `float'
+        mag : float
             Object magnitude, to be converted into counts
-        beta : `float`
+        beta : float
             PSF beta value for convolution
-        fwhm : `float`
+        fwhm : float
             PSF FWHM for convolution
-        stampName : `string`
-            Filename of output image
-        muLim : `float`
+        muLim : float
             Limiting surface brightness out to which to draw the stamp
-        magZp : `float`
+        magZp : float
             Magnitude zeropoint, to convert from mag to counts
-        pxScale : `float`
+        pxScale : float
             Desired image pixel scale, in arcseconds/px
 
-        Returns
+        Notes
         -------
-        Nothing--writes image to hard disk
-    NOTE: use this for large Sersic models!
+        hduList : astropy.io.fits.HDUList
+            Stamp (with header) of desired galaxy model
     '''
     assert (n >= 0.3) & (n <= 6.2),\
         "Sersic index must be between 0.3 and 6.2"
@@ -722,9 +745,7 @@ def makeSersicStamp(n, rEff, axRat, pa, mag, beta, fwhm, stampName,
     assert (beta > 0), "Beta must be positive."
     assert (fwhm == 0) | (fwhm > 0),\
         "FWHM must be either 0 or positive."
-    assert type(stampName) == str,\
-        "Please supply a valid path as the stamp name"
-    assert(pxScale > 0), "Pixel scale must be positive."
+    assert (pxScale > 0), "Pixel scale must be positive."
     flux = 10**(-0.4*(mag - magZp))
     incl = np.arccos(axRat)
     incl = galsim.Angle(incl, unit=galsim.radians)
@@ -750,5 +771,6 @@ def makeSersicStamp(n, rEff, axRat, pa, mag, beta, fwhm, stampName,
         return None
 
     hdu = fits.PrimaryHDU(gal_im)
-    hdulist = fits.HDUList([hdu])
-    hdulist.writeto(stampName, overwrite=True)
+    hduList = fits.HDUList([hdu])
+
+    return hduList
